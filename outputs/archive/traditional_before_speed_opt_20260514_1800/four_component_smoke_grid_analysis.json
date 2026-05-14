@@ -1,0 +1,20 @@
+{
+  "tag": "smoke",
+  "run_count": 18,
+  "profiles": [
+    "v3_raw_no_env",
+    "v3_raw_tph"
+  ],
+  "combos": [
+    "svr_ridge",
+    "svr_pls",
+    "svr_xgboost",
+    "pls_ridge",
+    "pls_pls",
+    "pls_xgboost",
+    "xgboost_ridge",
+    "xgboost_pls",
+    "xgboost_xgboost"
+  ],
+  "summary_csv": "four_component_smoke_grid_summary.csv"
+}

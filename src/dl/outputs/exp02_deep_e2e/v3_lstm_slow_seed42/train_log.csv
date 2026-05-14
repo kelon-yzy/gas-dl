@@ -1,0 +1,2 @@
+epoch,train_loss,val_loss,val_macro_RMSE,val_macro_MAE,improved
+1,520.6450926347212,53.18853954558677,6.843987867751955,5.752453883811334,True
