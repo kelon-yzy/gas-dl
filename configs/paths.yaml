@@ -1,0 +1,12 @@
+# V3 正式实验全局路径配置
+# 只保留 3 个根，其余路径在代码里用相对路径拼接
+
+project_root: .
+data_root: data
+outputs_root: outputs
+
+# 用法示例（Python）：
+#   from pathlib import Path
+#   ROOT = Path(__file__).resolve().parents[2]   # 项目根
+#   DATA = ROOT / "data" / "waveform_v3"
+#   OUT  = ROOT / "outputs" / "exp01_traditional"
