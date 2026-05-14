@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 
@@ -17,6 +18,11 @@ from scripts.environment_compensation_common import add_model_args, profile_data
 from scripts.train_patent_model import build_model_config, build_parser as build_train_parser
 from scripts.train_patent_model import prepare_training_data, run_training
 
+PIPELINE_PARENT = Path(__file__).resolve().parents[2]
+if str(PIPELINE_PARENT) not in sys.path:
+  sys.path.insert(0, str(PIPELINE_PARENT))
+
+from pipeline.cli_progress import build_cli_progress
 
 logger = get_logger(__name__)
 
@@ -67,12 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--metadata-filter", default="none")
   parser.add_argument("--physical-range-filter", default="none")
   parser.add_argument("--label-closure-filter", default="none")
-  parser.add_argument("--duplicate-filter", default="none")
-  parser.add_argument("--duplicate-per-mixture-limit", type=positive_int)
+  parser.add_argument("--duplicate-filter", default="per_mixture_limit")
+  parser.add_argument("--duplicate-per-mixture-limit", type=positive_int, default=3)
   parser.add_argument("--duplicate-filter-seed", type=int, default=42)
   parser.add_argument("--profiles", nargs="*", default=list(DEFAULT_PROFILES))
   parser.add_argument("--combo-list", nargs="*", default=list(COMBO_ORDER))
   parser.add_argument("--max-workers", type=positive_int, default=1)
+  parser.add_argument("--ui", action="store_true")
+  parser.add_argument("--no-ui", action="store_true")
   add_model_args(parser, positive_int)
   return parser
 
@@ -121,6 +129,7 @@ def _build_train_args(args: argparse.Namespace, profile: str, branch_model_type:
   train_args.xgb_learning_rate = args.xgb_learning_rate
   train_args.xgb_device = args.xgb_device
   train_args.xgb_n_jobs = args.xgb_n_jobs
+  train_args.n_jobs = args.n_jobs
   train_args.mc_env_samples = args.mc_env_samples if profile == "v3_env" else 0
   train_args.mc_env_sigma_t = args.mc_env_sigma_t
   train_args.mc_env_sigma_p = args.mc_env_sigma_p
@@ -148,6 +157,13 @@ def _row_from_summary(profile: str, combo: str, summary: dict[str, object], comb
     "macro_MaxRE_pct": summary[f"dynamic_{summary['meta_model_type']}_macro_MaxRE_pct"],
     "train_samples": summary["train_samples"],
     "test_samples": summary["test_samples"],
+    "fit_seconds": summary.get("fit_seconds"),
+    "evaluate_seconds": summary.get("evaluate_seconds"),
+    "write_seconds": summary.get("write_seconds"),
+    "total_seconds": summary.get("total_seconds"),
+    "n_jobs": summary.get("n_jobs"),
+    "xgb_n_jobs": summary.get("xgb_n_jobs"),
+    "prediction_cache_reused": summary.get("prediction_cache_reused"),
     "metadata_filter": summary.get("metadata_filter"),
     "physical_range_filter": summary.get("physical_range_filter"),
     "label_closure_filter": summary.get("label_closure_filter"),
@@ -172,7 +188,7 @@ def _row_from_summary(profile: str, combo: str, summary: dict[str, object], comb
   return row
 
 
-def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: ExecutionPlanItem) -> ExecutionTaskResult:
+def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: ExecutionPlanItem, progress=None, completed_before: int = 0, total_runs: int = 0) -> ExecutionTaskResult:
   profile = plan_item.profile
   logger.info(
     "grid item profile=%s branch=%s meta_count=%d",
@@ -189,12 +205,28 @@ def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: Execu
     plan_item.meta_model_types[0],
     profile_root / f"{plan_item.branch_model_type}_{plan_item.meta_model_types[0]}",
   )
+  if progress is not None:
+    progress.update_stage(
+      stage="prepare_training_data",
+      current_task=f"profile={profile} branch={plan_item.branch_model_type}",
+      completed=completed_before,
+      total=total_runs,
+    )
   prepared_data = prepare_training_data(base_branch_model_args)
   branch_config_model = MultiComponentPatentModel(
     config=build_model_config(base_branch_model_args, prepared_data.feature_profile_name),
     component_names=prepared_data.train.component_names,
   )
+  if progress is not None:
+    progress.update_metric(train=prepared_data.train.n_samples, test=prepared_data.test.n_samples)
+    progress.update_stage(
+      stage="fit_branch_stage",
+      current_task=f"profile={profile} branch={plan_item.branch_model_type}",
+      completed=completed_before,
+      total=total_runs,
+    )
   branch_artifacts = branch_config_model.fit_branch_stage(prepared_data.train)
+  branch_prediction_cache_holder = {}
 
   rows = []
   run_count = 0
@@ -202,9 +234,33 @@ def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: Execu
     combo = f"{plan_item.branch_model_type}_{meta_model_type}"
     combo_dir = profile_root / combo
     train_args = _build_train_args(args, profile, plan_item.branch_model_type, meta_model_type, combo_dir)
-    summary = run_training(train_args, prepared_data=prepared_data, branch_artifacts=branch_artifacts)
+    summary = run_training(
+      train_args,
+      prepared_data=prepared_data,
+      branch_artifacts=branch_artifacts,
+      prediction_cache_holder=branch_prediction_cache_holder,
+      progress=progress,
+      progress_context={
+        "profile": profile,
+        "combo": combo,
+        "branch": plan_item.branch_model_type,
+        "meta": meta_model_type,
+        "completed": completed_before + run_count,
+        "total": total_runs,
+      },
+    )
     rows.append(_row_from_summary(profile, combo, summary, combo_dir))
     run_count += 1
+    if progress is not None:
+      progress.log_message(
+        f"completed {combo} macro_RMSE={summary[f'dynamic_{summary['meta_model_type']}_macro_RMSE_pp']:.4f} total={summary.get('total_seconds', 0.0):.2f}s cache={summary.get('prediction_cache_reused')}"
+      )
+      progress.update_stage(
+        stage="write_summary",
+        current_task=f"profile={profile} combo={combo}",
+        completed=completed_before + run_count,
+        total=total_runs,
+      )
   return ExecutionTaskResult(rows=rows, run_count=run_count)
 
 
@@ -216,9 +272,13 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
   rows = []
   run_count = 0
   plan = build_execution_plan(args)
+  total_runs = sum(len(item.meta_model_types) for item in plan)
+  progress = build_cli_progress(force=args.ui, disable=args.no_ui)
+  progress.start_run(mode="traditional", title=args.tag, seed=args.seed, stage="plan")
+  progress.update_metric(profiles=len(args.profiles), combos=total_runs, max_workers=args.max_workers)
   if args.max_workers == 1:
     for plan_item in plan:
-      result = _run_plan_item(args, output_root, plan_item)
+      result = _run_plan_item(args, output_root, plan_item, progress=progress, completed_before=run_count, total_runs=total_runs)
       rows.extend(result.rows)
       run_count += result.run_count
   else:
@@ -239,9 +299,11 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     "combos": list(args.combo_list),
     "summary_csv": summary_path.name,
   }
+  progress.finish_run(status="done", completed=run_count, total=total_runs, summary_csv=summary_path.name)
   (output_root / f"four_component_{args.tag}_grid_analysis.json").write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
   return analysis
 
 
 if __name__ == "__main__":
   main()
+

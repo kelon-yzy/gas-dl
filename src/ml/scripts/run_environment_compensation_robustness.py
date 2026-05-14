@@ -67,13 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mc-env-sigma-t", type=float, default=0.5)
     parser.add_argument("--mc-env-sigma-p", type=float, default=0.005)
     parser.add_argument("--mc-env-sigma-h", type=float, default=1.0)
+    parser.add_argument("--duplicate-filter", default="per_mixture_limit")
+    parser.add_argument("--duplicate-per-mixture-limit", type=positive_int, default=3)
+    parser.add_argument("--duplicate-filter-seed", type=int, default=42)
     add_model_args(parser, positive_int)
     return parser
 
 
 def _load_split_model(args: argparse.Namespace, profile: str) -> tuple[MultiComponentPatentModel, PatentDataset, PatentDataset, int]:
     feature_profile_name = resolve_feature_profile_name(profile, args.component_mode)
-    dataset = load_patent_dataset(profile_data_dir(profile, Path(args.raw_data_dir), Path(args.env_data_dir)), profile=feature_profile_name)
+    dataset = load_patent_dataset(profile_data_dir(profile, Path(args.raw_data_dir), Path(args.env_data_dir)), profile=feature_profile_name, duplicate_filter=args.duplicate_filter, duplicate_per_mixture_limit=args.duplicate_per_mixture_limit, duplicate_filter_seed=args.duplicate_filter_seed)
     observed_labels = build_observed_fault_labels(dataset)
     dataset = dataset.with_fault_labels(observed_labels)
 
@@ -307,3 +310,6 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
 if __name__ == "__main__":
     main()
+
+
+

@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--noise-pressure-mpa", type=float, default=0.101325, help="Pressure used for environment-noise curves, in MPa. Default is 1 atm.")
     parser.add_argument("--noise-pressure-samples", type=positive_int, help="Number of test samples closest to --noise-pressure-mpa for noise curves.")
     parser.add_argument("--pressure-bins", type=positive_int, default=6, help="Number of pressure bins for line plots.")
+    parser.add_argument("--duplicate-filter", default="per_mixture_limit", help="Duplicate handling mode.")
+    parser.add_argument("--duplicate-per-mixture-limit", type=positive_int, default=3, help="Cap per mixture when duplicate_filter=per_mixture_limit.")
+    parser.add_argument("--duplicate-filter-seed", type=int, default=42, help="Random seed for duplicate filtering.")
     return parser
 
 
@@ -57,7 +60,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
     # 第 1 段：读取数据并补上分析标签。
     # 与训练脚本保持一致，先读数据并补充故障标签。
-    dataset = load_patent_dataset(args.data_dir)
+    dataset = load_patent_dataset(args.data_dir, duplicate_filter=args.duplicate_filter, duplicate_per_mixture_limit=args.duplicate_per_mixture_limit, duplicate_filter_seed=args.duplicate_filter_seed)
     observed_labels = build_observed_fault_labels(dataset)
     dataset = dataset.with_fault_labels(observed_labels)
 
@@ -138,3 +141,6 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
 if __name__ == "__main__":
     main()
+
+
+

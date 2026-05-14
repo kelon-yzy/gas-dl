@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
+from time import perf_counter
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,7 +22,12 @@ from patent_model.feature_profiles import FEATURE_PROFILES
 from patent_model.fault_labels import build_observed_fault_labels
 from patent_model.logging_utils import get_logger
 from patent_model.model_config_builder import build_model_config
-from patent_model.modeling import ComponentBranchArtifacts, MultiComponentPatentModel, MultiComponentPrediction
+from patent_model.modeling import (
+    ComponentBranchArtifacts,
+    MultiComponentPatentModel,
+    MultiComponentPrediction,
+    MultiComponentPredictionCache,
+)
 
 
 logger = get_logger(__name__)
@@ -86,8 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metadata-filter", default="none", help="Optional metadata filter, e.g. none or detection.")
     parser.add_argument("--physical-range-filter", default="none", help="Optional physical feature range filter.")
     parser.add_argument("--label-closure-filter", default="none", help="Optional label closure filter.")
-    parser.add_argument("--duplicate-filter", default="none", help="Optional duplicate handling mode.")
-    parser.add_argument("--duplicate-per-mixture-limit", type=positive_int, help="Optional cap when duplicate_filter=per_mixture_limit.")
+    parser.add_argument("--duplicate-filter", default="per_mixture_limit", help="Optional duplicate handling mode.")
+    parser.add_argument("--duplicate-per-mixture-limit", type=positive_int, default=3, help="Optional cap when duplicate_filter=per_mixture_limit.")
     parser.add_argument("--duplicate-filter-seed", type=int, default=42, help="Random seed for duplicate filtering.")
     return parser
 
@@ -113,7 +119,6 @@ def _weights_frame(test: PatentDataset, prediction: MultiComponentPrediction) ->
     """把每个样本、每个组分的动态权重展开成明细表。"""
 
     rows: list[dict[str, object]] = []
-    # 一个样本会对应三个组分，每个组分再展开三条模态权重。
     for sample_idx, sample_id in enumerate(test.sample_ids):
         for component_idx, component_name in enumerate(test.component_names):
             row = {"sample_id": sample_id, "component": component_name}
@@ -209,6 +214,9 @@ def run_training(
     dataset: PatentDataset | None = None,
     prepared_data: PreparedTrainingData | None = None,
     branch_artifacts: list[ComponentBranchArtifacts] | None = None,
+    prediction_cache_holder: dict[str, MultiComponentPredictionCache] | None = None,
+    progress=None,
+    progress_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """执行完整训练流程并写出 CSV / JSON 结果。"""
 
@@ -227,18 +235,48 @@ def run_training(
         prepared_data.train.n_samples,
         prepared_data.test.n_samples,
     )
+    if progress is not None:
+        progress.update_stage(
+            stage="fit_model",
+            current_task=f"profile={progress_context.get('profile')} combo={progress_context.get('combo')}",
+            completed=progress_context.get('completed'),
+            total=progress_context.get('total'),
+        )
+    fit_started = perf_counter()
     model = MultiComponentPatentModel(config=config, component_names=prepared_data.train.component_names).fit(
         prepared_data.train,
         branch_artifacts=branch_artifacts,
     )
-    metrics, prediction = model.evaluate(prepared_data.test)
+    fit_seconds = perf_counter() - fit_started
+    if progress is not None:
+        progress.update_metric(fit_seconds=fit_seconds)
+        progress.update_stage(
+            stage="evaluate",
+            current_task=f"profile={progress_context.get('profile')} combo={progress_context.get('combo')}",
+            completed=progress_context.get('completed'),
+            total=progress_context.get('total'),
+        )
+    evaluate_started = perf_counter()
+    prediction_cache_reused = False
+    prediction_cache = None
+    if prediction_cache_holder is not None:
+        prediction_cache = prediction_cache_holder.get("value")
+        prediction_cache_reused = prediction_cache is not None
+    if prediction_cache is None:
+        prediction_cache = model.predict_branches(prepared_data.test)
+        if prediction_cache_holder is not None:
+            prediction_cache_holder["value"] = prediction_cache
+    metrics, prediction = model.evaluate(prepared_data.test, prediction_cache=prediction_cache)
+    evaluate_seconds = perf_counter() - evaluate_started
 
+    write_started = perf_counter()
     predictions = _predictions_frame(prepared_data.test, prediction)
     weights = _weights_frame(prepared_data.test, prediction)
 
     predictions.to_csv(output / "predictions.csv", index=False)
     metrics.to_csv(output / "component_metrics.csv", index=False)
     weights.to_csv(output / "dynamic_weights.csv", index=False)
+    write_seconds = perf_counter() - write_started
 
     summary = {
         "data_dir": str(prepared_data.data_dir.resolve()),
@@ -271,6 +309,12 @@ def run_training(
         "xgb_learning_rate": config.xgb_learning_rate,
         "xgb_device": config.xgb_device,
         "xgb_n_jobs": config.xgb_n_jobs,
+        "n_jobs": config.n_jobs,
+        "fit_seconds": fit_seconds,
+        "evaluate_seconds": evaluate_seconds,
+        "write_seconds": write_seconds,
+        "total_seconds": fit_seconds + evaluate_seconds + write_seconds,
+        "prediction_cache_reused": prediction_cache_reused,
         "filter_report": prepared_data.train.filter_report,
         "metadata_filter_report": prepared_data.train.filter_report,
     }
@@ -280,6 +324,12 @@ def run_training(
     summary[f"{meta_key}_macro_MRE_pct"] = float(meta_metrics["MRE_pct"].mean())
     summary[f"{meta_key}_macro_R2"] = float(meta_metrics["R2"].mean())
     summary[f"{meta_key}_macro_MaxRE_pct"] = float(meta_metrics["MaxRE_pct"].max())
+    if progress is not None:
+        progress.update_metric(
+            macro_RMSE=summary[f"{meta_key}_macro_RMSE_pp"],
+            total_seconds=summary["total_seconds"],
+            cache=prediction_cache_reused,
+        )
     summary["branch_effective_pls_components"] = [
         {
             "component": component_name,
@@ -314,3 +364,5 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
 if __name__ == "__main__":
     main()
+
+
