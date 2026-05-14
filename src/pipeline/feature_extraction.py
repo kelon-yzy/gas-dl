@@ -9,11 +9,11 @@ SIM_ROOT = ROOT / "src" / "sim"
 if str(SIM_ROOT) not in sys.path:
     sys.path.insert(0, str(SIM_ROOT))
 
-from scripts.generate_traditional_from_waveform_v3 import generate_traditional_from_waveform_v3
+from scripts.extract_dual_waveform_features import generate_traditional_from_waveform_v3
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export full traditional-model feature tables from V3.1 dual-channel waveform data.")
+    parser = argparse.ArgumentParser(description="Export traditional-model feature tables from V3.1 dual-channel waveform data.")
     parser.add_argument("--source-dir", default=str(ROOT / "data" / "waveform_v3"))
     parser.add_argument("--output-dir", default=str(ROOT / "outputs" / "exp01_traditional"))
     parser.add_argument("--sequence-limit", type=int, default=None)

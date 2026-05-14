@@ -11,7 +11,6 @@ import pandas as pd
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.acoustic_waveform_v3 import generate_burst_pulse
 from sim_common.phases import phase_boundaries, phase_for_timestep
 
 
@@ -24,12 +23,6 @@ SLOW_CHANNELS = [
     "H_RH",
     "L_m",
     "piston_position_m",
-]
-TRADITIONAL_SAMPLE_STAGES = [
-    (0, "baseline_stage", "calibration_control"),
-    (20, "distance_stage", "synthetic_measurement"),
-    (70, "pressure_stage", "synthetic_measurement"),
-    (100, "purge_stage", "synthetic_measurement"),
 ]
 
 
@@ -44,8 +37,6 @@ def _load_waveform_package(source_dir: Path) -> dict[str, object]:
         "slow": np.load(source_dir / "sequences" / "slow.npy", mmap_mode="r"),
         "labels": np.load(source_dir / "labels" / "y.npy", mmap_mode="r"),
         "sequence_ids": np.load(source_dir / "metadata" / "sequence_ids.npy", allow_pickle=True),
-        "slow_channel_names": np.load(source_dir / "metadata" / "slow_channel_names.npy", allow_pickle=True),
-        "label_names": np.load(source_dir / "metadata" / "label_names.npy", allow_pickle=True),
     }
 
 
@@ -123,7 +114,7 @@ def _estimate_fiber_features(waveform_int16, scale_factor: float, l_m: float) ->
     fit_x = np.arange(direct_index, fit_end, dtype=np.float32) / sample_rate_hz
     fit_y = np.clip(envelope[direct_index:fit_end], 1e-9, None)
     log_y = np.log(fit_y)
-    slope, intercept = np.polyfit(fit_x, log_y, deg=1)
+    slope, _ = np.polyfit(fit_x, log_y, deg=1)
     tau_s = float(max(-1.0 / min(slope, -1e-9), 1e-6))
     t_round_s = 0.0
     if len(peak_indices) >= 2:
@@ -166,10 +157,14 @@ def _estimate_environment_features(t_c: float, p_mpa: float, h_rh: float) -> dic
 def _prepare_output_dirs(output_dir: Path) -> dict[str, Path]:
     paths = {
         "feature_table": output_dir / "features" / "feature_table.csv",
+        "feature_table_env": output_dir / "features" / "feature_table_env.csv",
         "feature_manifest": output_dir / "features" / "feature_manifest.json",
         "train_acoustic": output_dir / "training" / "train_acoustic.csv",
         "train_optical": output_dir / "training" / "train_optical.csv",
         "train_thermal": output_dir / "training" / "train_thermal.csv",
+        "train_acoustic_env": output_dir / "training" / "train_acoustic_env.csv",
+        "train_optical_env": output_dir / "training" / "train_optical_env.csv",
+        "train_thermal_env": output_dir / "training" / "train_thermal_env.csv",
         "labels": output_dir / "labels" / "labels.csv",
         "condition_grid": output_dir / "condition_grid_v1.csv",
     }
@@ -203,12 +198,20 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
         sequence_ids = sequence_ids[:sequence_limit]
 
     feature_rows = []
+    feature_env_rows = []
     acoustic_rows = []
     optical_rows = []
     thermal_rows = []
+    acoustic_env_rows = []
+    optical_env_rows = []
+    thermal_env_rows = []
     label_rows = []
     condition_rows = []
     sample_counter = 1
+
+    baseline_ch4 = float(np.median(slow[:, timesteps[0], 0]))
+    baseline_co2 = float(np.median(slow[:, timesteps[0], 1]))
+    baseline_tcs = float(np.median(slow[:, timesteps[0], 2]))
 
     for seq_index, sequence_id in enumerate(sequence_ids):
         condition_row = condition.loc[sequence_id]
@@ -224,17 +227,8 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
             h_rh = float(slow_values[5])
             l_m = float(slow_values[6])
 
-            ultrasonic_features = _estimate_ultrasonic_features(
-                ultrasonic[seq_index, timestep],
-                float(ultrasonic_scale[seq_index, timestep]),
-                l_m=l_m,
-                t_c=t_c,
-            )
-            fiber_features = _estimate_fiber_features(
-                fiber_mic[seq_index, timestep],
-                float(fiber_mic_scale[seq_index, timestep]),
-                l_m=l_m,
-            )
+            ultrasonic_features = _estimate_ultrasonic_features(ultrasonic[seq_index, timestep], float(ultrasonic_scale[seq_index, timestep]), l_m=l_m, t_c=t_c)
+            fiber_features = _estimate_fiber_features(fiber_mic[seq_index, timestep], float(fiber_mic_scale[seq_index, timestep]), l_m=l_m)
             env_features = _estimate_environment_features(t_c=t_c, p_mpa=p_mpa, h_rh=h_rh)
 
             base_row = {
@@ -263,24 +257,27 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
                 **fiber_features,
                 **env_features,
             }
-            base_row["f_peak"] = ultrasonic_features["f_peak"]
-            base_row["A_fft_max"] = ultrasonic_features["A_fft_max"]
-            base_row["Amp"] = ultrasonic_features["Amp"]
-            base_row["sound_speed"] = ultrasonic_features["sound_speed"]
-            base_row["attenuation_alpha"] = ultrasonic_features["attenuation_alpha"]
-            base_row["delta_I_CH4"] = float(slow_values[0] - 2.5)
-            base_row["delta_I_CO2"] = float(slow_values[1] - 2.5)
+            base_row["delta_I_CH4"] = float(slow_values[0] - baseline_ch4)
+            base_row["delta_I_CO2"] = float(slow_values[1] - baseline_co2)
             base_row["A_NDIR_CH4"] = abs(base_row["delta_I_CH4"])
             base_row["A_NDIR_CO2"] = abs(base_row["delta_I_CO2"])
+            base_row["R_CH4"] = float(slow_values[0] / max(baseline_ch4, 1e-9))
+            base_row["R_CO2"] = float(slow_values[1] / max(baseline_co2, 1e-9))
+            base_row["A_CH4"] = base_row["A_NDIR_CH4"]
+            base_row["A_CO2"] = base_row["A_NDIR_CO2"]
             base_row["ndir_ch4_saturated"] = False
             base_row["ndir_co2_saturated"] = False
-            base_row["optical_baseline_drift_ch4"] = 0.0
-            base_row["optical_baseline_drift_co2"] = 0.0
+            base_row["optical_baseline_drift_ch4"] = base_row["delta_I_CH4"]
+            base_row["optical_baseline_drift_co2"] = base_row["delta_I_CO2"]
             base_row["lambda_mix_calibrated"] = float(base_row["V_TCS"])
-            base_row["thermal_baseline_drift"] = 0.0
+            base_row["thermal_baseline_drift"] = float(base_row["V_TCS"] - baseline_tcs)
+            base_row["delta_V_TCS"] = base_row["thermal_baseline_drift"]
             base_row["calibration_status"] = "pending"
 
-            feature_rows.append(base_row)
+            feature_rows.append(dict(base_row))
+            feature_env_row = dict(base_row)
+            feature_env_rows.append(feature_env_row)
+
             acoustic_rows.append({
                 "sample_id": sample_id,
                 "TOF": base_row["TOF"],
@@ -300,6 +297,37 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
                 "P_MPa": base_row["P_MPa"],
                 "H_RH": base_row["H_RH"],
             })
+            acoustic_env_rows.append({
+                "sample_id": sample_id,
+                "TOF": base_row["TOF"],
+                "Amp": base_row["Amp"],
+                "f_peak": base_row["f_peak"],
+                "A_fft_max": base_row["A_fft_max"],
+                "tau_s": base_row["tau_s"],
+                "tau_ms": base_row["tau_ms"],
+                "t_round_s": base_row["t_round_s"],
+                "t_round_ms": base_row["t_round_ms"],
+                "reflection_count": base_row["reflection_count"],
+                "fiber_direct_amp": base_row["fiber_direct_amp"],
+                "fiber_tail_energy": base_row["fiber_tail_energy"],
+                "fiber_alpha_est": base_row["fiber_alpha_est"],
+                "L_m": base_row["L_m"],
+                "T_C": base_row["T_C"],
+                "P_MPa": base_row["P_MPa"],
+                "H_RH": base_row["H_RH"],
+                "T_K": base_row["T_K"],
+                "P_kPa": base_row["P_kPa"],
+                "p_H2O_kPa": base_row["p_H2O_kPa"],
+                "x_H2O": base_row["x_H2O"],
+                "AH_g_m3": base_row["AH_g_m3"],
+                "P_dry_kPa": base_row["P_dry_kPa"],
+                "sound_speed": base_row["sound_speed"],
+                "attenuation_alpha": base_row["attenuation_alpha"],
+                "c_sound": base_row["c_sound"],
+                "c_T_norm": base_row["c_T_norm"],
+                "delta_Amp": base_row["delta_Amp"],
+            })
+
             optical_rows.append({
                 "sample_id": sample_id,
                 "V_NDIR_CH4": base_row["V_NDIR_CH4"],
@@ -310,6 +338,25 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
                 "P_MPa": base_row["P_MPa"],
                 "H_RH": base_row["H_RH"],
             })
+            optical_env_rows.append({
+                "sample_id": sample_id,
+                "V_NDIR_CH4": base_row["V_NDIR_CH4"],
+                "V_NDIR_CO2": base_row["V_NDIR_CO2"],
+                "delta_I_CH4": base_row["delta_I_CH4"],
+                "delta_I_CO2": base_row["delta_I_CO2"],
+                "A_NDIR_CH4": base_row["A_NDIR_CH4"],
+                "A_NDIR_CO2": base_row["A_NDIR_CO2"],
+                "T_C": base_row["T_C"],
+                "P_MPa": base_row["P_MPa"],
+                "H_RH": base_row["H_RH"],
+                "T_K": base_row["T_K"],
+                "P_kPa": base_row["P_kPa"],
+                "p_H2O_kPa": base_row["p_H2O_kPa"],
+                "x_H2O": base_row["x_H2O"],
+                "AH_g_m3": base_row["AH_g_m3"],
+                "P_dry_kPa": base_row["P_dry_kPa"],
+            })
+
             thermal_rows.append({
                 "sample_id": sample_id,
                 "V_TCS": base_row["V_TCS"],
@@ -317,6 +364,21 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
                 "P_MPa": base_row["P_MPa"],
                 "H_RH": base_row["H_RH"],
             })
+            thermal_env_rows.append({
+                "sample_id": sample_id,
+                "V_TCS": base_row["V_TCS"],
+                "delta_V_TCS": base_row["delta_V_TCS"],
+                "T_C": base_row["T_C"],
+                "P_MPa": base_row["P_MPa"],
+                "H_RH": base_row["H_RH"],
+                "T_K": base_row["T_K"],
+                "P_kPa": base_row["P_kPa"],
+                "p_H2O_kPa": base_row["p_H2O_kPa"],
+                "x_H2O": base_row["x_H2O"],
+                "AH_g_m3": base_row["AH_g_m3"],
+                "P_dry_kPa": base_row["P_dry_kPa"],
+            })
+
             label_rows.append({
                 "sample_id": sample_id,
                 "x_H2": base_row["x_H2"],
@@ -347,9 +409,13 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
 
     paths = _prepare_output_dirs(output_dir)
     pd.DataFrame(feature_rows).to_csv(paths["feature_table"], index=False)
+    pd.DataFrame(feature_env_rows).to_csv(paths["feature_table_env"], index=False)
     pd.DataFrame(acoustic_rows).to_csv(paths["train_acoustic"], index=False)
     pd.DataFrame(optical_rows).to_csv(paths["train_optical"], index=False)
     pd.DataFrame(thermal_rows).to_csv(paths["train_thermal"], index=False)
+    pd.DataFrame(acoustic_env_rows).to_csv(paths["train_acoustic_env"], index=False)
+    pd.DataFrame(optical_env_rows).to_csv(paths["train_optical_env"], index=False)
+    pd.DataFrame(thermal_env_rows).to_csv(paths["train_thermal_env"], index=False)
     pd.DataFrame(label_rows).to_csv(paths["labels"], index=False)
     pd.DataFrame(condition_rows).to_csv(paths["condition_grid"], index=False)
     paths["feature_manifest"].write_text(
@@ -360,6 +426,7 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
                 "sampling_policy": "phase_aligned_default",
                 "acoustic_columns": list(pd.DataFrame(acoustic_rows).columns),
                 "feature_table_columns": list(pd.DataFrame(feature_rows).columns),
+                "feature_table_env_columns": list(pd.DataFrame(feature_env_rows).columns),
             },
             indent=2,
             ensure_ascii=False,
