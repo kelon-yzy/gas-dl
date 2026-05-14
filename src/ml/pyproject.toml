@@ -1,0 +1,9 @@
+[project]
+dependencies = [
+  "xgboost>=2.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

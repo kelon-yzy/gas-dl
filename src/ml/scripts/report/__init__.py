@@ -1,0 +1,2 @@
+"""Report figure generation helpers."""
+

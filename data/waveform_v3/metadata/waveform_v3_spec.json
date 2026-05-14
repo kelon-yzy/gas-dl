@@ -1,0 +1,47 @@
+{
+  "dataset_version": "V3.1",
+  "channels": {
+    "ultrasonic": {
+      "sample_rate_hz": 200000,
+      "center_frequency_hz": 40000.0,
+      "burst_cycles": 8,
+      "measurement_window_s": 0.005,
+      "adc_max_int16": 32767,
+      "noise_std_v": 0.001,
+      "calibration_status": "pending",
+      "waveform_samples": 1000
+    },
+    "fiber_mic": {
+      "sample_rate_hz": 200000,
+      "center_frequency_hz": 40000.0,
+      "burst_cycles": 8,
+      "measurement_window_s": 0.01,
+      "adc_max_int16": 32767,
+      "noise_std_v": 0.001,
+      "l_direct_factor": 0.5,
+      "wall_reflection_coef": 0.5,
+      "max_reflections": 15,
+      "calibration_status": "pending",
+      "waveform_samples": 2000
+    }
+  },
+  "slow_channels": [
+    "V_NDIR_CH4",
+    "V_NDIR_CO2",
+    "V_TCS",
+    "T_C",
+    "P_MPa",
+    "H_RH",
+    "L_m",
+    "piston_position_m"
+  ],
+  "labels": [
+    "x_H2",
+    "x_CH4",
+    "x_CO2",
+    "x_N2"
+  ],
+  "sequences": 16,
+  "timesteps": 12,
+  "dt_s": 1.0
+}

@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+
+from data.channel_groups import resolve_time_indices
+from data.dataset_v2 import _to_str_list, load_sequence_metadata
+
+
+EXPECTED_SLOW_CHANNEL_NAMES = [
+    "V_NDIR_CH4",
+    "V_NDIR_CO2",
+    "V_TCS",
+    "T_C",
+    "P_MPa",
+    "H_RH",
+    "L_m",
+    "piston_position_m",
+]
+EXPECTED_WAVEFORM_LABEL_NAMES = ["x_H2", "x_CH4", "x_CO2", "x_N2"]
+DEFAULT_ULTRASONIC_SAMPLES = 1000
+DEFAULT_FIBER_MIC_SAMPLES = 2000
+
+
+def load_waveform_npz(npz_path: str | Path) -> dict:
+    path = Path(npz_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Waveform npz file not found: {path}")
+    with np.load(path, allow_pickle=True) as data:
+        required = {"ultrasonic", "ultrasonic_scale", "fiber_mic", "fiber_mic_scale", "slow", "y", "slow_channel_names", "label_names"}
+        missing = required.difference(data.files)
+        if missing:
+            raise ValueError(f"Missing keys in {path}: {sorted(missing)}")
+        output = {key: data[key].copy() for key in data.files}
+    validate_waveform_arrays(
+        output["ultrasonic"],
+        output["ultrasonic_scale"],
+        output["fiber_mic"],
+        output["fiber_mic_scale"],
+        output["slow"],
+        output["y"],
+        output["slow_channel_names"],
+        output["label_names"],
+        ultrasonic_samples=output["ultrasonic"].shape[2],
+        fiber_mic_samples=output["fiber_mic"].shape[2],
+    )
+    output["ultrasonic_samples"] = int(output["ultrasonic"].shape[2])
+    output["fiber_mic_samples"] = int(output["fiber_mic"].shape[2])
+    return output
+
+
+def load_waveform_package(path: str | Path) -> dict:
+    path = Path(path)
+    if path.is_file():
+        return load_waveform_npz(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Waveform package not found: {path}")
+
+    spec_path = path / "metadata" / "waveform_v3_spec.json"
+    if not spec_path.exists():
+        raise FileNotFoundError(f"Waveform spec file not found: {spec_path}")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    ultrasonic_spec = spec["channels"]["ultrasonic"]
+    fiber_spec = spec["channels"]["fiber_mic"]
+    output = {
+        "ultrasonic": np.load(path / "sequences" / "ultrasonic_int16.npy", mmap_mode="r"),
+        "ultrasonic_scale": np.load(path / "sequences" / "ultrasonic_scale.npy", mmap_mode="r"),
+        "fiber_mic": np.load(path / "sequences" / "fiber_mic_int16.npy", mmap_mode="r"),
+        "fiber_mic_scale": np.load(path / "sequences" / "fiber_mic_scale.npy", mmap_mode="r"),
+        "slow": np.load(path / "sequences" / "slow.npy", mmap_mode="r"),
+        "y": np.load(path / "labels" / "y.npy", mmap_mode="r"),
+        "sequence_ids": np.load(path / "metadata" / "sequence_ids.npy", allow_pickle=True),
+        "slow_channel_names": np.load(path / "metadata" / "slow_channel_names.npy", allow_pickle=True),
+        "label_names": np.load(path / "metadata" / "label_names.npy", allow_pickle=True),
+        "spec": spec,
+        "ultrasonic_samples": int(ultrasonic_spec.get("waveform_samples", DEFAULT_ULTRASONIC_SAMPLES)),
+        "fiber_mic_samples": int(fiber_spec.get("waveform_samples", DEFAULT_FIBER_MIC_SAMPLES)),
+    }
+    validate_waveform_arrays(
+        output["ultrasonic"],
+        output["ultrasonic_scale"],
+        output["fiber_mic"],
+        output["fiber_mic_scale"],
+        output["slow"],
+        output["y"],
+        output["slow_channel_names"],
+        output["label_names"],
+        ultrasonic_samples=output["ultrasonic_samples"],
+        fiber_mic_samples=output["fiber_mic_samples"],
+    )
+    return output
+
+
+def validate_waveform_arrays(
+    ultrasonic,
+    ultrasonic_scale,
+    fiber_mic,
+    fiber_mic_scale,
+    slow,
+    y,
+    slow_channel_names,
+    label_names,
+    ultrasonic_samples=DEFAULT_ULTRASONIC_SAMPLES,
+    fiber_mic_samples=DEFAULT_FIBER_MIC_SAMPLES,
+) -> None:
+    if ultrasonic.ndim != 3:
+        raise ValueError(f"Expected ultrasonic.ndim == 3, got {ultrasonic.ndim}")
+    if ultrasonic_scale.ndim != 2:
+        raise ValueError(f"Expected ultrasonic_scale.ndim == 2, got {ultrasonic_scale.ndim}")
+    if fiber_mic.ndim != 3:
+        raise ValueError(f"Expected fiber_mic.ndim == 3, got {fiber_mic.ndim}")
+    if fiber_mic_scale.ndim != 2:
+        raise ValueError(f"Expected fiber_mic_scale.ndim == 2, got {fiber_mic_scale.ndim}")
+    if slow.ndim != 3:
+        raise ValueError(f"Expected slow.ndim == 3, got {slow.ndim}")
+    if y.ndim != 2:
+        raise ValueError(f"Expected y.ndim == 2, got {y.ndim}")
+    if ultrasonic.shape[:2] != ultrasonic_scale.shape:
+        raise ValueError("ultrasonic and ultrasonic_scale leading dimensions must match")
+    if fiber_mic.shape[:2] != fiber_mic_scale.shape:
+        raise ValueError("fiber_mic and fiber_mic_scale leading dimensions must match")
+    if ultrasonic.shape[:2] != slow.shape[:2] or fiber_mic.shape[:2] != slow.shape[:2]:
+        raise ValueError("waveform and slow leading dimensions must match")
+    if ultrasonic.shape[2] != ultrasonic_samples:
+        raise ValueError(f"Expected ultrasonic.shape[2] == {ultrasonic_samples}, got {ultrasonic.shape[2]}")
+    if fiber_mic.shape[2] != fiber_mic_samples:
+        raise ValueError(f"Expected fiber_mic.shape[2] == {fiber_mic_samples}, got {fiber_mic.shape[2]}")
+    if slow.shape[2] != 8:
+        raise ValueError(f"Expected slow.shape[2] == 8, got {slow.shape[2]}")
+    if y.shape[1] != 4:
+        raise ValueError(f"Expected y.shape[1] == 4, got {y.shape[1]}")
+    if _to_str_list(slow_channel_names) != EXPECTED_SLOW_CHANNEL_NAMES:
+        raise ValueError(f"Unexpected slow_channel_names: {_to_str_list(slow_channel_names)}")
+    if _to_str_list(label_names) != EXPECTED_WAVEFORM_LABEL_NAMES:
+        raise ValueError(f"Unexpected label_names: {_to_str_list(label_names)}")
+
+
+class WaveformSequenceDataset(Dataset):
+    def __init__(
+        self,
+        npz_path: str | Path,
+        indices,
+        slow_scaler=None,
+        time_indices=None,
+        index_path: str | Path | None = None,
+    ):
+        data = load_waveform_package(npz_path)
+        self.ultrasonic = data["ultrasonic"]
+        self.ultrasonic_scale = data["ultrasonic_scale"]
+        self.fiber_mic = data["fiber_mic"]
+        self.fiber_mic_scale = data["fiber_mic_scale"]
+        self.slow = data["slow"].astype(np.float32)
+        self.y = data["y"].astype(np.float32)
+        self.sequence_ids = _to_str_list(data.get("sequence_ids", np.arange(len(self.ultrasonic))))
+        self.metadata = load_sequence_metadata(index_path, self.sequence_ids)
+        self.time_indices = resolve_time_indices(time_indices)
+        self.slow_scaler = slow_scaler
+
+        if isinstance(indices, pd.Series):
+            indices = indices.tolist()
+        if len(indices) > 0 and isinstance(indices[0], str):
+            lookup = {sid: i for i, sid in enumerate(self.sequence_ids)}
+            self.indices = np.array([lookup[sid] for sid in indices], dtype=np.int64)
+        else:
+            self.indices = np.array(indices, dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        source_idx = int(self.indices[idx])
+        ultrasonic = self.ultrasonic[source_idx]
+        ultrasonic_scale = self.ultrasonic_scale[source_idx]
+        fiber_mic = self.fiber_mic[source_idx]
+        fiber_mic_scale = self.fiber_mic_scale[source_idx]
+        slow = self.slow[source_idx]
+        target = self.y[source_idx]
+
+        if self.time_indices is not None:
+            ultrasonic = ultrasonic[self.time_indices, :]
+            ultrasonic_scale = ultrasonic_scale[self.time_indices]
+            fiber_mic = fiber_mic[self.time_indices, :]
+            fiber_mic_scale = fiber_mic_scale[self.time_indices]
+            slow = slow[self.time_indices, :]
+        if self.slow_scaler is not None:
+            slow = self.slow_scaler.transform(slow)
+
+        meta = self.metadata.iloc[source_idx].to_dict()
+        meta["sample_id"] = self.sequence_ids[source_idx]
+        return {
+            "ultrasonic": torch.from_numpy(np.array(ultrasonic, dtype=np.int16, copy=True)),
+            "ultrasonic_scale": torch.from_numpy(np.array(ultrasonic_scale, dtype=np.float32, copy=True)),
+            "fiber_mic": torch.from_numpy(np.array(fiber_mic, dtype=np.int16, copy=True)),
+            "fiber_mic_scale": torch.from_numpy(np.array(fiber_mic_scale, dtype=np.float32, copy=True)),
+            "slow": torch.from_numpy(np.asarray(slow, dtype=np.float32)),
+            "target": torch.from_numpy(target.astype(np.float32)),
+            "meta": meta,
+        }
