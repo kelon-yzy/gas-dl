@@ -10,13 +10,13 @@ from patent_model.feature_profiles import FEATURE_PROFILES
 from patent_model.model_config_builder import build_model_config
 
 
-PROFILES = ("raw_no_env", "raw_tph", "derived_env", "derived_env_mc_aug")
+PROFILES = ("v3_raw_no_env", "v3_raw_tph", "v3_env")
 
 
 def add_model_args(parser: argparse.ArgumentParser, positive_int_type: Callable[[str], int]) -> None:
     """为脚本统一添加模型类型和超参数选项。"""
 
-    parser.add_argument("--component-mode", default="three", choices=("three", "four"))
+    parser.add_argument("--component-mode", default="four", choices=("three", "four"))
     parser.add_argument("--branch-model-type", default="svr", choices=("svr", "pls", "xgboost"))
     parser.add_argument("--meta-model-type", default="ridge", choices=("ridge", "pls", "xgboost"))
     parser.add_argument("--perturbation-scale", type=float, default=0.04)
@@ -60,23 +60,28 @@ def extend_model_cli_args(args: argparse.Namespace, argv: list[str]) -> None:
 def profile_data_dir(profile: str, raw_data_dir: Path, env_data_dir: Path) -> Path:
     """根据 profile 选择原始或环境补偿数据目录。"""
 
-    return env_data_dir if profile in {"derived_env", "derived_env_mc_aug"} else raw_data_dir
+    return env_data_dir if profile == "v3_env" else raw_data_dir
 
 
 def base_feature_profile(profile: str) -> str:
     """把实验层 profile 映射到训练入口实际使用的基础 profile。"""
 
-    return "derived_env" if profile == "derived_env_mc_aug" else profile
+    mapping = {
+        "v3_raw_no_env": "v3_waveform_dual_channel_four",
+        "v3_raw_tph": "v3_waveform_dual_channel_four",
+        "v3_env": "v3_waveform_dual_channel_env_four",
+    }
+    if profile not in mapping:
+        raise ValueError(f"Unknown experiment profile: {profile}")
+    return mapping[profile]
 
 
 def resolve_feature_profile_name(profile: str, component_mode: str) -> str:
     """根据组分模式映射实验 profile 到实际 profile 名。"""
 
     base = base_feature_profile(profile)
-    if component_mode == "four":
-        if base.endswith("_four"):
-            return base
-        return f"{base}_four"
+    if component_mode != "four":
+        raise ValueError("Current V3.1 traditional experiments only support four-component mode.")
     return base
 
 

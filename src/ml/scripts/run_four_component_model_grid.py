@@ -13,7 +13,7 @@ import pandas as pd
 from patent_model.logging_utils import get_logger
 from patent_model.modeling import MultiComponentPatentModel
 from scripts._cli_utils import positive_int
-from scripts.environment_compensation_common import PROFILES, add_model_args, profile_data_dir, resolve_feature_profile_name
+from scripts.environment_compensation_common import add_model_args, profile_data_dir, resolve_feature_profile_name
 from scripts.train_patent_model import build_model_config, build_parser as build_train_parser
 from scripts.train_patent_model import prepare_training_data, run_training
 
@@ -21,6 +21,7 @@ from scripts.train_patent_model import prepare_training_data, run_training
 logger = get_logger(__name__)
 
 
+DEFAULT_PROFILES = ("v3_raw_no_env", "v3_raw_tph")
 COMBO_ORDER = (
   "svr_ridge",
   "svr_pls",
@@ -36,8 +37,6 @@ COMBO_ORDER = (
 
 @dataclass(frozen=True)
 class ExecutionPlanItem:
-  """同一 profile + branch 类型下的一组 meta 实验。"""
-
   profile: str
   branch_model_type: str
   meta_model_types: tuple[str, ...]
@@ -45,8 +44,6 @@ class ExecutionPlanItem:
 
 @dataclass(frozen=True)
 class ExecutionTaskResult:
-  """单个 profile + branch 任务的汇总输出。"""
-
   rows: list[dict[str, object]]
   run_count: int
 
@@ -54,7 +51,7 @@ class ExecutionTaskResult:
 def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description="Run four-component traditional model grid.")
   parser.add_argument("--raw-data-dir", default="../output")
-  parser.add_argument("--env-data-dir", default="../../simulation-data/output_environment_v3sync")
+  parser.add_argument("--env-data-dir", default="../output")
   parser.add_argument("--output-root", default="outputs")
   parser.add_argument("--tag", default="v3sync")
   parser.add_argument("--seed", type=int, default=42)
@@ -63,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--n-perturbations", type=positive_int, default=24)
   parser.add_argument("--stacking-folds", type=positive_int, default=5)
   parser.add_argument("--test-ratio", type=float, default=0.2)
-  parser.add_argument("--mc-env-samples", type=int, default=4)
+  parser.add_argument("--mc-env-samples", type=int, default=0)
   parser.add_argument("--mc-env-sigma-t", type=float, default=0.5)
   parser.add_argument("--mc-env-sigma-p", type=float, default=0.005)
   parser.add_argument("--mc-env-sigma-h", type=float, default=1.0)
@@ -73,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--duplicate-filter", default="none")
   parser.add_argument("--duplicate-per-mixture-limit", type=positive_int)
   parser.add_argument("--duplicate-filter-seed", type=int, default=42)
+  parser.add_argument("--profiles", nargs="*", default=list(DEFAULT_PROFILES))
   parser.add_argument("--combo-list", nargs="*", default=list(COMBO_ORDER))
   parser.add_argument("--max-workers", type=positive_int, default=1)
   add_model_args(parser, positive_int)
@@ -85,10 +83,8 @@ def _combo_types(combo: str) -> tuple[str, str]:
 
 
 def build_execution_plan(args: argparse.Namespace) -> list[ExecutionPlanItem]:
-  """把 combo 列表整理成按 profile + branch 分组的执行计划。"""
-
   plan: list[ExecutionPlanItem] = []
-  for profile in PROFILES:
+  for profile in args.profiles:
     grouped_meta: dict[str, list[str]] = {}
     for combo in args.combo_list:
       branch_model_type, meta_model_type = _combo_types(combo)
@@ -105,8 +101,6 @@ def build_execution_plan(args: argparse.Namespace) -> list[ExecutionPlanItem]:
 
 
 def _build_train_args(args: argparse.Namespace, profile: str, branch_model_type: str, meta_model_type: str, output_dir: Path) -> argparse.Namespace:
-  """为单个 combo 构造独立训练参数，避免共享命名空间被污染。"""
-
   train_args = build_train_parser().parse_args([])
   train_args.data_dir = str(profile_data_dir(profile, Path(args.raw_data_dir), Path(args.env_data_dir)))
   train_args.output_dir = str(output_dir)
@@ -127,7 +121,7 @@ def _build_train_args(args: argparse.Namespace, profile: str, branch_model_type:
   train_args.xgb_learning_rate = args.xgb_learning_rate
   train_args.xgb_device = args.xgb_device
   train_args.xgb_n_jobs = args.xgb_n_jobs
-  train_args.mc_env_samples = args.mc_env_samples if profile == "derived_env_mc_aug" else 0
+  train_args.mc_env_samples = args.mc_env_samples if profile == "v3_env" else 0
   train_args.mc_env_sigma_t = args.mc_env_sigma_t
   train_args.mc_env_sigma_p = args.mc_env_sigma_p
   train_args.mc_env_sigma_h = args.mc_env_sigma_h
@@ -179,8 +173,6 @@ def _row_from_summary(profile: str, combo: str, summary: dict[str, object], comb
 
 
 def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: ExecutionPlanItem) -> ExecutionTaskResult:
-  """执行单个 profile + branch 任务，内部复用 branch stage。"""
-
   profile = plan_item.profile
   logger.info(
     "grid item profile=%s branch=%s meta_count=%d",
@@ -238,13 +230,14 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
         run_count += result.run_count
 
   frame = pd.DataFrame(rows).sort_values(["profile", "combo"]).reset_index(drop=True)
-  frame.to_csv(output_root / f"four_component_{args.tag}_grid_summary.csv", index=False)
+  summary_path = output_root / f"four_component_{args.tag}_grid_summary.csv"
+  frame.to_csv(summary_path, index=False)
   analysis = {
     "tag": args.tag,
     "run_count": run_count,
-    "profiles": list(PROFILES),
+    "profiles": list(args.profiles),
     "combos": list(args.combo_list),
-    "summary_csv": f"four_component_{args.tag}_grid_summary.csv",
+    "summary_csv": summary_path.name,
   }
   (output_root / f"four_component_{args.tag}_grid_analysis.json").write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
   return analysis
