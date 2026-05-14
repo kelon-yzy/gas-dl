@@ -26,6 +26,7 @@ def add_model_args(parser: argparse.ArgumentParser, positive_int_type: Callable[
     parser.add_argument("--xgb-learning-rate", type=float, default=0.05)
     parser.add_argument("--xgb-device", default="cpu")
     parser.add_argument("--xgb-n-jobs", type=positive_int_type, default=1)
+    parser.add_argument("--n-jobs", type=int, default=-1)
 
 
 def extend_model_cli_args(args: argparse.Namespace, argv: list[str]) -> None:
@@ -53,6 +54,8 @@ def extend_model_cli_args(args: argparse.Namespace, argv: list[str]) -> None:
             args.xgb_device,
             "--xgb-n-jobs",
             str(args.xgb_n_jobs),
+            "--n-jobs",
+            str(args.n_jobs),
         ]
     )
 

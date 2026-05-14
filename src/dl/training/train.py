@@ -6,6 +6,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -100,7 +101,13 @@ def _move_waveform_batch(batch: dict, device: torch.device) -> dict:
 def _forward_batch(model, batch, device):
     if _is_waveform_batch(batch):
         moved = _move_waveform_batch(batch, device)
-        pred = model(moved["ultrasonic"], moved["ultrasonic_scale"], moved["fiber_mic"], moved["fiber_mic_scale"], moved["slow"])
+        if getattr(model, "use_waveform", False):
+            pred = model(moved["ultrasonic"], moved["ultrasonic_scale"], moved["fiber_mic"], moved["fiber_mic_scale"], moved["slow"])
+        else:
+            slow_input = moved["slow"]
+            if model.__class__.__name__ == "TCNRegressor":
+                slow_input = slow_input.transpose(1, 2)
+            pred = model(slow_input)
         return pred, moved["target"], moved["meta"]
     x, y, meta = batch
     x = _move_tensor(x, device)
@@ -359,10 +366,23 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     )
     stopper = EarlyStopping(patience=int(config["training"].get("early_stopping_patience", 25)), mode="min")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    total_epochs = int(config["training"].get("epochs", 200))
+    progress = config.get("_cli_progress")
+    if progress is not None:
+        progress.start_run(mode="deep", title=config["run"]["name"], seed=int(config["run"].get("seed", 42)), stage="setup")
+        progress.update_metric(
+            model=config["model"]["name"],
+            device=str(device),
+            batch_size=batch_size,
+            n_train=len(datasets["train"]),
+            n_val=len(datasets["val"]),
+            n_test=len(datasets["test"]),
+        )
 
     log_rows = []
     best_path = output_dir / "best_model.pt"
-    for epoch in range(1, int(config["training"].get("epochs", 200)) + 1):
+    for epoch in range(1, total_epochs + 1):
+        epoch_started = perf_counter()
         train_loss = _train_one_epoch(
             model,
             loaders["train"],
@@ -391,7 +411,22 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
             "improved": improved,
         }
         log_rows.append(row)
+        if progress is not None:
+            progress.update_stage(stage="epoch", current_task=f"epoch={epoch}/{total_epochs}", completed=epoch, total=total_epochs)
+            progress.update_metric(
+                epoch=epoch,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                val_macro_RMSE=monitor_value,
+                improved=improved,
+                best=stopper.best,
+                bad_epochs=stopper.bad_epochs,
+                patience=stopper.patience,
+                epoch_seconds=perf_counter() - epoch_started,
+            )
         if stopper.should_stop:
+            if progress is not None:
+                progress.log_message(f"early stop at epoch {epoch}")
             break
 
     if best_path.exists():
@@ -419,7 +454,11 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     if "use_waveform" in config.get("model", {}):
         summary["use_waveform"] = bool(config["model"]["use_waveform"])
 
-    (output_dir / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    if progress is not None:
+        progress.finish_run(status="done", macro_RMSE=summary["macro_RMSE"], epochs_trained=summary["epochs_trained"])
+
+    config_to_write = {k: v for k, v in config.items() if not k.startswith("_")}
+    (output_dir / "config.json").write_text(json.dumps(config_to_write, indent=2, ensure_ascii=False), encoding="utf-8")
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     component_metrics.to_csv(output_dir / "component_metrics.csv", index=False)
     pd.DataFrame(log_rows).to_csv(output_dir / "train_log.csv", index=False)
@@ -434,9 +473,11 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     return summary
 
 
-def train_one(config_path: str | Path, epochs_override: int | None = None) -> dict:
+def train_one(config_path: str | Path, epochs_override: int | None = None, progress=None) -> dict:
     config_path = Path(config_path).resolve()
     config = load_config(config_path)
+    if progress is not None:
+        config["_cli_progress"] = progress
     return train_config(config, epochs_override=epochs_override)
 
 

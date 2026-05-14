@@ -80,6 +80,21 @@ class ComponentPrediction:
 
 
 @dataclass
+class ComponentBranchPredictionCache:
+    """单组分测试集分支预测缓存，供多个 meta learner 复用。"""
+
+    base_predictions: np.ndarray
+    dynamic_weights: np.ndarray
+
+
+@dataclass
+class MultiComponentPredictionCache:
+    """多组分测试集分支预测缓存。"""
+
+    components: list[ComponentBranchPredictionCache]
+
+
+@dataclass
 class MultiComponentPrediction:
     """三个组分拼接后的整体预测结果。"""
 
@@ -426,13 +441,11 @@ class SingleComponentPatentModel:
             weights[valid_idx] = weight_valid
         return base, weights
 
-    def predict(self, dataset: PatentDataset) -> ComponentPrediction:
-        """输出单个组分的单模态结果、两种平均融合和最终元学习融合。"""
+    def predict_branches(self, dataset: PatentDataset) -> ComponentBranchPredictionCache:
+        """计算可跨 meta learner 复用的分支预测和动态权重。"""
 
-        # 第 1 段：三条分支各自出一个基础预测。
         inputs = _branch_inputs(dataset, self.config.include_environment)
         base_predictions = np.column_stack([self.branch_models[name].predict(inputs[name]) for name in BRANCH_NAMES])
-        # 第 2 段：基于当前样本的稳定性估计动态权重。
         dynamic_weights = _compute_dynamic_weights(
             inputs,
             base_predictions,
@@ -440,7 +453,15 @@ class SingleComponentPatentModel:
             self.branch_feature_scales,
             self.config,
         )
-        # 第 3 段：给出固定平均、动态平均和最终元学习融合三个版本。
+        return ComponentBranchPredictionCache(base_predictions=base_predictions, dynamic_weights=dynamic_weights)
+
+    def predict(self, dataset: PatentDataset, prediction_cache: ComponentBranchPredictionCache | None = None) -> ComponentPrediction:
+        """输出单个组分的单模态结果、两种平均融合和最终元学习融合。"""
+
+        if prediction_cache is None:
+            prediction_cache = self.predict_branches(dataset)
+        base_predictions = prediction_cache.base_predictions
+        dynamic_weights = prediction_cache.dynamic_weights
         fixed_average = base_predictions.mean(axis=1)
         dynamic_average = np.sum(base_predictions * dynamic_weights, axis=1)
         meta_key = f"dynamic_{self.config.meta_model_type}"
@@ -467,6 +488,11 @@ class MultiComponentPatentModel:
         self.config = config or ModelConfig()
         self.component_names = component_names
         self.models = [SingleComponentPatentModel(self.config) for _ in component_names]
+
+    def predict_branches(self, dataset: PatentDataset) -> MultiComponentPredictionCache:
+        """计算多组分分支预测缓存，供同一 branch 下多个 meta learner 复用。"""
+
+        return MultiComponentPredictionCache(components=[model.predict_branches(dataset) for model in self.models])
 
     def fit_branch_stage(self, dataset: PatentDataset) -> list[ComponentBranchArtifacts]:
         """按组分拟合分支阶段，供多个元学习器复用。"""
@@ -508,10 +534,18 @@ class MultiComponentPatentModel:
             model.fit(dataset, dataset.target_for(component_idx), branch_artifacts=branch_artifacts[component_idx])
         return self
 
-    def predict(self, dataset: PatentDataset) -> MultiComponentPrediction:
+    def predict(self, dataset: PatentDataset, prediction_cache: MultiComponentPredictionCache | None = None) -> MultiComponentPrediction:
         """汇总三个组分在各个模型家族下的预测矩阵。"""
 
-        component_predictions = [model.predict(dataset) for model in self.models]
+        if prediction_cache is not None and len(prediction_cache.components) != len(self.models):
+            raise ValueError("prediction_cache component count does not match component_names.")
+        component_predictions = [
+            model.predict(
+                dataset,
+                prediction_cache=None if prediction_cache is None else prediction_cache.components[component_idx],
+            )
+            for component_idx, model in enumerate(self.models)
+        ]
         by_model: dict[str, np.ndarray] = {}
         # 把每个组分的一维输出按列拼回 (n_samples, 3) 的矩阵。
         for model_name in _active_model_names(self.config):
@@ -520,10 +554,14 @@ class MultiComponentPatentModel:
         weights = np.stack([prediction.dynamic_weights for prediction in component_predictions], axis=1)
         return MultiComponentPrediction(raw=raw, by_model=by_model, dynamic_weights=weights)
 
-    def evaluate(self, dataset: PatentDataset) -> tuple[pd.DataFrame, MultiComponentPrediction]:
+    def evaluate(
+        self,
+        dataset: PatentDataset,
+        prediction_cache: MultiComponentPredictionCache | None = None,
+    ) -> tuple[pd.DataFrame, MultiComponentPrediction]:
         """对每个模型家族、每个组分分别计算误差指标。"""
 
-        prediction = self.predict(dataset)
+        prediction = self.predict(dataset, prediction_cache=prediction_cache)
         rows: list[dict[str, object]] = []
         # 输出是长表结构，方便后续直接 groupby 或画图。
         for model_name, values in prediction.by_model.items():

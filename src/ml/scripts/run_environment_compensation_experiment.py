@@ -121,3 +121,4 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
 if __name__ == "__main__":
     main()
+
