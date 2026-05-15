@@ -50,6 +50,13 @@ def load_config(config_path: Path) -> dict:
         return yaml.safe_load(handle)
 
 
+def _ensure_scaler_path(data_config: dict, output_dir: Path) -> None:
+    if data_config.get("scaler_path"):
+        return
+    filename = "scaler_slow_sequence.json" if data_config.get("dataset_type") == "waveform_v3" else "scaler_sequence.json"
+    data_config["scaler_path"] = str(output_dir / filename)
+
+
 def select_device(name: str) -> torch.device:
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,7 +112,7 @@ def _forward_batch(model, batch, device):
             pred = model(moved["ultrasonic"], moved["ultrasonic_scale"], moved["fiber_mic"], moved["fiber_mic_scale"], moved["slow"])
         else:
             slow_input = moved["slow"]
-            if model.__class__.__name__ == "TCNRegressor":
+            if getattr(model, "input_format", "NTC").upper() == "NCT":
                 slow_input = slow_input.transpose(1, 2)
             pred = model(slow_input)
         return pred, moved["target"], moved["meta"]
@@ -158,6 +165,27 @@ def predict(model, loader, device):
     )
 
 
+def evaluate_with_predictions(model, loader, loss_fn, device) -> tuple[float, PredictionBundle]:
+    model.eval()
+    losses = []
+    y_true, y_pred, frames = [], [], []
+    with torch.no_grad():
+        for batch in loader:
+            pred, y, meta = _forward_batch(model, batch, device)
+            losses.append(float(loss_fn(pred, y).item()))
+            y_pred.append(pred.cpu().numpy())
+            y_true.append(y.cpu().numpy())
+            frames.append(_metadata_to_frame(meta))
+    return (
+        float(np.mean(losses)),
+        PredictionBundle(
+            y_true=np.vstack(y_true),
+            y_pred=np.vstack(y_pred),
+            meta=pd.concat(frames, ignore_index=True),
+        ),
+    )
+
+
 def evaluate_loss(model, loader, loss_fn, device) -> float:
     model.eval()
     losses = []
@@ -204,6 +232,7 @@ def _build_waveform_datasets(data_config: dict, seed: int):
         "slow_scaler": slow_scaler,
         "time_indices": time_indices,
         "index_path": index_path,
+        "preloaded_data": data,
     }
     datasets = {name: WaveformSequenceDataset(indices=indices, **common) for name, indices in split_indices.items()}
     return datasets, splits
@@ -252,6 +281,7 @@ def _build_v2_datasets(data_config: dict, seed: int):
         "index_path": index_path,
         "acoustic_feature_path": acoustic_feature_path,
         "acoustic_features": acoustic_features,
+        "preloaded_data": data,
     }
     datasets = {name: V2SequenceDataset(indices=indices, **common) for name, indices in split_indices.items()}
     return datasets, splits
@@ -340,6 +370,7 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     set_seed(int(config["run"].get("seed", 42)))
     output_dir = resolve_path(config["run"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_scaler_path(config["data"], output_dir)
 
     label_names = _load_label_names(config)
     datasets, splits = build_datasets(config)
@@ -395,8 +426,7 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
             scaler=scaler,
         )
 
-        val_loss = evaluate_loss(model, loaders["val"], loss_fn, device)
-        val_bundle = predict(model, loaders["val"], device)
+        val_loss, val_bundle = evaluate_with_predictions(model, loaders["val"], loss_fn, device)
         val_summary, _ = regression_metrics(val_bundle.y_true, val_bundle.y_pred, label_names=label_names)
         monitor_value = val_summary["macro_RMSE"]
         improved = stopper.step(monitor_value)

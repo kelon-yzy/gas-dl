@@ -386,7 +386,12 @@ class SingleComponentPatentModel:
         n_groups = np.unique(groups).size
         n_splits = min(self.config.stacking_folds, n_groups)
         if n_splits < 2:
-            # 组数太少时退化成全量拟合，至少保证流程可执行。
+            logger.warning(
+                "OOF fallback: only %d unique group(s) available for stacking_folds=%d; "
+                "using in-sample branch predictions for meta inputs.",
+                n_groups,
+                self.config.stacking_folds,
+            )
             fitted = {
                 name: _fit_branch_model(self.branch_models[name], self.config, inputs[name], target)
                 for name in BRANCH_NAMES

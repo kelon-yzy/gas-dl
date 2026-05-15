@@ -27,6 +27,22 @@ DEFAULT_ULTRASONIC_SAMPLES = 1000
 DEFAULT_FIBER_MIC_SAMPLES = 2000
 
 
+def _load_waveform_sequence_ids(path: str | Path) -> list[str]:
+    path = Path(path)
+    if path.is_file():
+        with np.load(path, allow_pickle=True) as data:
+            if "sequence_ids" in data.files:
+                return _to_str_list(data["sequence_ids"])
+            if "slow" in data.files:
+                return _to_str_list(np.arange(data["slow"].shape[0]))
+        raise ValueError(f"sequence_ids and slow are both missing in {path}")
+    sequence_ids_path = path / "metadata" / "sequence_ids.npy"
+    if sequence_ids_path.exists():
+        return _to_str_list(np.load(sequence_ids_path, allow_pickle=True))
+    data = load_waveform_package(path)
+    return _to_str_list(data.get("sequence_ids", np.arange(len(data["ultrasonic"]))))
+
+
 def load_waveform_npz(npz_path: str | Path) -> dict:
     path = Path(npz_path)
     if not path.exists():
@@ -148,16 +164,34 @@ class WaveformSequenceDataset(Dataset):
         slow_scaler=None,
         time_indices=None,
         index_path: str | Path | None = None,
+        preloaded_data: dict | None = None,
     ):
-        data = load_waveform_package(npz_path)
-        self.ultrasonic = data["ultrasonic"]
-        self.ultrasonic_scale = data["ultrasonic_scale"]
-        self.fiber_mic = data["fiber_mic"]
-        self.fiber_mic_scale = data["fiber_mic_scale"]
-        self.slow = data["slow"].astype(np.float32)
-        self.y = data["y"].astype(np.float32)
-        self.sequence_ids = _to_str_list(data.get("sequence_ids", np.arange(len(self.ultrasonic))))
-        self.metadata = load_sequence_metadata(index_path, self.sequence_ids)
+        self.npz_path = Path(npz_path)
+        self.index_path = index_path
+        self._preloaded_data = preloaded_data
+        self.ultrasonic = None
+        self.ultrasonic_scale = None
+        self.fiber_mic = None
+        self.fiber_mic_scale = None
+        self.slow = None
+        self.y = None
+        self.metadata = None
+        if preloaded_data is not None:
+            validate_waveform_arrays(
+                preloaded_data["ultrasonic"],
+                preloaded_data["ultrasonic_scale"],
+                preloaded_data["fiber_mic"],
+                preloaded_data["fiber_mic_scale"],
+                preloaded_data["slow"],
+                preloaded_data["y"],
+                preloaded_data["slow_channel_names"],
+                preloaded_data["label_names"],
+                ultrasonic_samples=preloaded_data["ultrasonic"].shape[2],
+                fiber_mic_samples=preloaded_data["fiber_mic"].shape[2],
+            )
+            self.sequence_ids = _to_str_list(preloaded_data.get("sequence_ids", np.arange(len(preloaded_data["slow"]))))
+        else:
+            self.sequence_ids = _load_waveform_sequence_ids(self.npz_path)
         self.time_indices = resolve_time_indices(time_indices)
         self.slow_scaler = slow_scaler
 
@@ -172,7 +206,32 @@ class WaveformSequenceDataset(Dataset):
     def __len__(self):
         return len(self.indices)
 
+    def _ensure_loaded(self) -> None:
+        if self.ultrasonic is not None:
+            return
+        data = self._preloaded_data if self._preloaded_data is not None else load_waveform_package(self.npz_path)
+        self.ultrasonic = data["ultrasonic"]
+        self.ultrasonic_scale = data["ultrasonic_scale"]
+        self.fiber_mic = data["fiber_mic"]
+        self.fiber_mic_scale = data["fiber_mic_scale"]
+        self.slow = data["slow"]
+        self.y = data["y"]
+        self.metadata = load_sequence_metadata(self.index_path, self.sequence_ids)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["ultrasonic"] = None
+        state["ultrasonic_scale"] = None
+        state["fiber_mic"] = None
+        state["fiber_mic_scale"] = None
+        state["slow"] = None
+        state["y"] = None
+        state["metadata"] = None
+        state["_preloaded_data"] = None
+        return state
+
     def __getitem__(self, idx):
+        self._ensure_loaded()
         source_idx = int(self.indices[idx])
         ultrasonic = self.ultrasonic[source_idx]
         ultrasonic_scale = self.ultrasonic_scale[source_idx]
@@ -197,7 +256,7 @@ class WaveformSequenceDataset(Dataset):
             "ultrasonic_scale": torch.from_numpy(np.array(ultrasonic_scale, dtype=np.float32, copy=True)),
             "fiber_mic": torch.from_numpy(np.array(fiber_mic, dtype=np.int16, copy=True)),
             "fiber_mic_scale": torch.from_numpy(np.array(fiber_mic_scale, dtype=np.float32, copy=True)),
-            "slow": torch.from_numpy(np.asarray(slow, dtype=np.float32)),
+            "slow": torch.from_numpy(np.array(slow, dtype=np.float32, copy=True)),
             "target": torch.from_numpy(target.astype(np.float32)),
             "meta": meta,
         }

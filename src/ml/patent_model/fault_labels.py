@@ -185,4 +185,6 @@ def inject_faults(dataset: PatentDataset, case: str, severity: str = "medium", s
         optical_columns=dataset.optical_columns,
         thermal_columns=dataset.thermal_columns,
         environment_columns=dataset.environment_columns,
+        provenance=dict(dataset.provenance),
+        filter_report=dict(dataset.filter_report),
     )

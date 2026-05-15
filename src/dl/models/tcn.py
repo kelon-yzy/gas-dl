@@ -36,6 +36,8 @@ class TemporalBlock(nn.Module):
 
 
 class TCNRegressor(nn.Module):
+    input_format = "NCT"
+
     def __init__(
         self,
         in_channels: int = 12,
@@ -63,4 +65,3 @@ class TCNRegressor(nn.Module):
 
     def forward(self, x):
         return self.head(self.encoder(x))
-

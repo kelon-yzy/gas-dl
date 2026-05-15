@@ -413,7 +413,10 @@ def load_patent_dataset(
     _require_columns(optical, ["sample_id", *optical_columns], str(profile_spec["optical_file"]))
     _require_columns(thermal, ["sample_id", *thermal_columns], str(profile_spec["thermal_file"]))
     _require_columns(labels, ["sample_id", *TARGET_COLUMNS], "labels.csv")
-    _require_columns(condition, ["sample_id", "mixture_id", "stage_id", "repeat_id", "status"], "condition_grid_v1.csv")
+    required_condition_columns = ["sample_id", "mixture_id", "stage_id", "repeat_id", "status"]
+    if target_columns == FOUR_TARGET_COLUMNS:
+        required_condition_columns.append("x_N2")
+    _require_columns(condition, required_condition_columns, "condition_grid_v1.csv")
 
     # 三张训练表必须按同一批 sample_id 严格对齐，后续才可以直接拼接。
     sample_ids = acoustic["sample_id"].tolist()
@@ -438,13 +441,14 @@ def load_patent_dataset(
         "sample_id",
         "mixture_id",
         "stage_id",
-        "x_N2",
         "repeat_id",
         "status",
         "pressure_stage",
         "distance_stage",
         "piston_position_m",
     ]
+    if target_columns == FOUR_TARGET_COLUMNS or "x_N2" in condition.columns:
+        condition_columns.append("x_N2")
     for optional_column in ("source_timestep", "source_phase_id"):
         if optional_column in condition.columns:
             condition_columns.append(optional_column)

@@ -86,6 +86,18 @@ def load_v2_npz(npz_path: str | Path) -> dict:
     return output
 
 
+def _load_v2_sequence_ids(npz_path: str | Path) -> list[str]:
+    path = Path(npz_path)
+    if not path.exists():
+        raise FileNotFoundError(f"V2 npz file not found: {path}")
+    with np.load(path, allow_pickle=True) as data:
+        if "sequence_ids" in data.files:
+            return _to_str_list(data["sequence_ids"])
+        if "X" in data.files:
+            return _to_str_list(np.arange(data["X"].shape[0]))
+    raise ValueError(f"sequence_ids and X are both missing in {path}")
+
+
 def validate_v2_arrays(X, y, channel_names, label_names) -> None:
     if X.ndim != 3:
         raise ValueError(f"Expected X.ndim == 3, got {X.ndim}")
@@ -136,22 +148,24 @@ class V2SequenceDataset(Dataset):
         index_path: str | Path | None = None,
         acoustic_feature_path: str | Path | None = None,
         acoustic_features: list[str] | None = None,
+        preloaded_data: dict | None = None,
     ):
-        data = load_v2_npz(npz_path)
-        self.X = data["X"].astype(np.float32)
-        self.y = data["y"].astype(np.float32)
-        self.sequence_ids = _to_str_list(data.get("sequence_ids", np.arange(len(self.X))))
+        self.npz_path = Path(npz_path)
+        self.index_path = index_path
+        self.acoustic_feature_path = acoustic_feature_path
+        self.acoustic_features = list(acoustic_features) if acoustic_features else None
+        self._preloaded_data = preloaded_data
+        self.X = None
+        self.y = None
+        self.metadata = None
+        if preloaded_data is not None:
+            validate_v2_arrays(preloaded_data["X"], preloaded_data["y"], preloaded_data["channel_names"], preloaded_data["label_names"])
+            self.sequence_ids = _to_str_list(preloaded_data.get("sequence_ids", np.arange(len(preloaded_data["X"]))))
+        else:
+            self.sequence_ids = _load_v2_sequence_ids(self.npz_path)
         self.channel_names = list(EXPECTED_CHANNEL_NAMES)
-        if acoustic_features:
-            acoustic = load_acoustic_feature_array(
-                acoustic_feature_path,
-                self.sequence_ids,
-                self.X.shape[1],
-                list(acoustic_features),
-            )
-            self.X = np.concatenate([self.X, acoustic], axis=2)
-            self.channel_names.extend(acoustic_features)
-        self.metadata = load_sequence_metadata(index_path, self.sequence_ids)
+        if self.acoustic_features:
+            self.channel_names.extend(self.acoustic_features)
 
         if isinstance(indices, pd.Series):
             indices = indices.tolist()
@@ -171,7 +185,33 @@ class V2SequenceDataset(Dataset):
     def __len__(self):
         return len(self.indices)
 
+    def _ensure_loaded(self) -> None:
+        if self.X is not None:
+            return
+        data = self._preloaded_data if self._preloaded_data is not None else load_v2_npz(self.npz_path)
+        X = data["X"].astype(np.float32)
+        if self.acoustic_features:
+            acoustic = load_acoustic_feature_array(
+                self.acoustic_feature_path,
+                self.sequence_ids,
+                X.shape[1],
+                self.acoustic_features,
+            )
+            X = np.concatenate([X, acoustic], axis=2)
+        self.X = X
+        self.y = data["y"].astype(np.float32)
+        self.metadata = load_sequence_metadata(self.index_path, self.sequence_ids)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["X"] = None
+        state["y"] = None
+        state["metadata"] = None
+        state["_preloaded_data"] = None
+        return state
+
     def __getitem__(self, idx):
+        self._ensure_loaded()
         source_idx = int(self.indices[idx])
         x = self.X[source_idx]
         y = self.y[source_idx]

@@ -115,6 +115,8 @@ def add_environment_noise(
         optical_columns=dataset.optical_columns,
         thermal_columns=dataset.thermal_columns,
         environment_columns=dataset.environment_columns,
+        provenance=dict(dataset.provenance),
+        filter_report=dict(dataset.filter_report),
     )
 
 
@@ -184,6 +186,8 @@ def add_profile_environment_noise(
             optical_columns=noisy.optical_columns,
             thermal_columns=noisy.thermal_columns,
             environment_columns=noisy.environment_columns,
+            provenance=dict(noisy.provenance),
+            filter_report=dict(noisy.filter_report),
         )
 
     replacements = _derived_environment_values(noisy.environment)
@@ -202,6 +206,8 @@ def add_profile_environment_noise(
         optical_columns=noisy.optical_columns,
         thermal_columns=noisy.thermal_columns,
         environment_columns=noisy.environment_columns,
+        provenance=dict(noisy.provenance),
+        filter_report=dict(noisy.filter_report),
     )
 
 
@@ -241,6 +247,8 @@ def select_pressure_slice(
         optical_columns=selected.optical_columns,
         thermal_columns=selected.thermal_columns,
         environment_columns=selected.environment_columns,
+        provenance=dict(selected.provenance),
+        filter_report=dict(selected.filter_report),
     )
 
 

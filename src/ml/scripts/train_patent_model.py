@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import numpy as np
 import pandas as pd
 
 from patent_model.config import BRANCH_NAMES
@@ -28,26 +27,10 @@ from patent_model.modeling import (
     MultiComponentPrediction,
     MultiComponentPredictionCache,
 )
+from scripts._cli_utils import limit_dataset, positive_int
 
 
 logger = get_logger(__name__)
-
-
-def positive_int(value: str) -> int:
-    """argparse 类型校验：必须为正整数。"""
-
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be positive")
-    return parsed
-
-
-def limit_dataset(dataset: PatentDataset, limit: int | None) -> PatentDataset:
-    """调试用：按前 N 条样本截断 PatentDataset。"""
-
-    if limit is None or limit >= dataset.n_samples:
-        return dataset
-    return dataset.subset(np.arange(limit))
 
 
 @dataclass(frozen=True)
