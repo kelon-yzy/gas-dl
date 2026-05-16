@@ -210,12 +210,13 @@ class WaveformSequenceDataset(Dataset):
         if self.ultrasonic is not None:
             return
         data = self._preloaded_data if self._preloaded_data is not None else load_waveform_package(self.npz_path)
-        self.ultrasonic = data["ultrasonic"]
-        self.ultrasonic_scale = data["ultrasonic_scale"]
-        self.fiber_mic = data["fiber_mic"]
-        self.fiber_mic_scale = data["fiber_mic_scale"]
-        self.slow = data["slow"]
-        self.y = data["y"]
+        # 将 mmap 或只读数据转为可写连续 ndarray，消除 __getitem__ 中逐样本 copy 的开销
+        self.ultrasonic = np.array(data["ultrasonic"], dtype=np.int16, copy=True)
+        self.ultrasonic_scale = np.array(data["ultrasonic_scale"], dtype=np.float32, copy=True)
+        self.fiber_mic = np.array(data["fiber_mic"], dtype=np.int16, copy=True)
+        self.fiber_mic_scale = np.array(data["fiber_mic_scale"], dtype=np.float32, copy=True)
+        self.slow = np.array(data["slow"], dtype=np.float32, copy=True)
+        self.y = np.array(data["y"], dtype=np.float32, copy=True)
         self.metadata = load_sequence_metadata(self.index_path, self.sequence_ids)
 
     def __getstate__(self):
@@ -252,11 +253,11 @@ class WaveformSequenceDataset(Dataset):
         meta = self.metadata.iloc[source_idx].to_dict()
         meta["sample_id"] = self.sequence_ids[source_idx]
         return {
-            "ultrasonic": torch.from_numpy(np.array(ultrasonic, dtype=np.int16, copy=True)),
-            "ultrasonic_scale": torch.from_numpy(np.array(ultrasonic_scale, dtype=np.float32, copy=True)),
-            "fiber_mic": torch.from_numpy(np.array(fiber_mic, dtype=np.int16, copy=True)),
-            "fiber_mic_scale": torch.from_numpy(np.array(fiber_mic_scale, dtype=np.float32, copy=True)),
-            "slow": torch.from_numpy(np.array(slow, dtype=np.float32, copy=True)),
-            "target": torch.from_numpy(target.astype(np.float32)),
+            "ultrasonic": torch.from_numpy(ultrasonic),
+            "ultrasonic_scale": torch.from_numpy(ultrasonic_scale),
+            "fiber_mic": torch.from_numpy(fiber_mic),
+            "fiber_mic_scale": torch.from_numpy(fiber_mic_scale),
+            "slow": torch.from_numpy(slow),
+            "target": torch.from_numpy(target),
             "meta": meta,
         }

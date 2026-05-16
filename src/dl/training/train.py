@@ -150,17 +150,18 @@ def apply_environment_augmentation(x: torch.Tensor, input_format: str, sigma: fl
 
 def predict(model, loader, device):
     model.eval()
-    y_true, y_pred, frames = [], [], []
+    preds_gpu, targets_gpu, frames = [], [], []
     with torch.no_grad():
         for batch in loader:
             pred, y, meta = _forward_batch(model, batch, device)
-            pred = pred.cpu().numpy()
-            y_pred.append(pred)
-            y_true.append(y.cpu().numpy())
+            preds_gpu.append(pred)
+            targets_gpu.append(y)
             frames.append(_metadata_to_frame(meta))
+    all_preds = torch.cat(preds_gpu, dim=0).cpu().numpy()
+    all_targets = torch.cat(targets_gpu, dim=0).cpu().numpy()
     return PredictionBundle(
-        y_true=np.vstack(y_true),
-        y_pred=np.vstack(y_pred),
+        y_true=all_targets,
+        y_pred=all_preds,
         meta=pd.concat(frames, ignore_index=True),
     )
 
@@ -168,19 +169,21 @@ def predict(model, loader, device):
 def evaluate_with_predictions(model, loader, loss_fn, device) -> tuple[float, PredictionBundle]:
     model.eval()
     losses = []
-    y_true, y_pred, frames = [], [], []
+    preds_gpu, targets_gpu, frames = [], [], []
     with torch.no_grad():
         for batch in loader:
             pred, y, meta = _forward_batch(model, batch, device)
             losses.append(float(loss_fn(pred, y).item()))
-            y_pred.append(pred.cpu().numpy())
-            y_true.append(y.cpu().numpy())
+            preds_gpu.append(pred)
+            targets_gpu.append(y)
             frames.append(_metadata_to_frame(meta))
+    all_preds = torch.cat(preds_gpu, dim=0).cpu().numpy()
+    all_targets = torch.cat(targets_gpu, dim=0).cpu().numpy()
     return (
         float(np.mean(losses)),
         PredictionBundle(
-            y_true=np.vstack(y_true),
-            y_pred=np.vstack(y_pred),
+            y_true=all_targets,
+            y_pred=all_preds,
             meta=pd.concat(frames, ignore_index=True),
         ),
     )

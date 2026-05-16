@@ -62,8 +62,10 @@ class WaveformDatasetRuntimeTests(unittest.TestCase):
 
             dataset = WaveformSequenceDataset(npz_path=base, indices=[0, 1], index_path=None)
             sample = dataset[0]
-            self.assertIsInstance(dataset.slow, np.memmap)
-            self.assertIsInstance(dataset.y, np.memmap)
+            # _ensure_loaded 将 mmap 数据预转为可写 ndarray，消除逐样本 copy
+            self.assertIsInstance(dataset.slow, np.ndarray)
+            self.assertIsInstance(dataset.y, np.ndarray)
+            self.assertFalse(np.shares_memory(dataset.slow, np.load(base / "sequences" / "slow.npy", mmap_mode="r")))
 
             payload = pickle.dumps(dataset, protocol=pickle.HIGHEST_PROTOCOL)
             self.assertLess(len(payload), 100_000)
@@ -73,8 +75,9 @@ class WaveformDatasetRuntimeTests(unittest.TestCase):
             self.assertIsNone(restored.y)
 
             sample = restored[0]
-            self.assertIsInstance(restored.slow, np.memmap)
-            self.assertIsInstance(restored.y, np.memmap)
+            # 恢复后重新加载，数据仍是可写 ndarray
+            self.assertIsInstance(restored.slow, np.ndarray)
+            self.assertIsInstance(restored.y, np.ndarray)
             self.assertEqual(tuple(sample["slow"].shape), (3, 8))
             self.assertEqual(tuple(sample["target"].shape), (4,))
             self.assertEqual(sample["meta"]["sample_id"], "Q000001")
