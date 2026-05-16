@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 from torch import nn
 
@@ -28,6 +30,8 @@ class AcousticWaveformEncoder(nn.Module):
         if waveform_int16.shape[0] != scale_factor.shape[0]:
             raise ValueError("batch size mismatch between waveform_int16 and scale_factor")
 
-        waveform = waveform_int16.to(torch.float32) * scale_factor.unsqueeze(1)
-        encoded = self.features(waveform.unsqueeze(1))
+        # 波形编码器强制 FP32：int16 转 float32 + scale_factor 乘法在 FP16 下易梯度 underflow
+        with torch.amp.autocast(device_type=waveform_int16.device.type, enabled=False) if waveform_int16.device.type == "cuda" else nullcontext():
+            waveform = waveform_int16.to(torch.float32) * scale_factor.unsqueeze(1)
+            encoded = self.features(waveform.unsqueeze(1))
         return encoded.squeeze(-1)

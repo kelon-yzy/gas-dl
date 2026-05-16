@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 from torch import nn
 
@@ -100,6 +102,8 @@ class MultimodalFusionV3Regressor(nn.Module):
             embeddings.append(self.fiber_mic_encoder(flat_waveform, flat_scale).reshape(batch_size, timesteps, -1))
 
         fused = torch.cat([*embeddings, slow], dim=2) if embeddings else slow
-        _, (hidden, _) = self.sequence_backbone(fused)
+        # LSTM 在 FP16 autocast 下数值不稳定，强制 FP32
+        with torch.amp.autocast(device_type=slow.device.type, enabled=False) if slow.device.type == "cuda" else nullcontext():
+            _, (hidden, _) = self.sequence_backbone(fused)
         last = hidden[-1]
         return self.head(last)
