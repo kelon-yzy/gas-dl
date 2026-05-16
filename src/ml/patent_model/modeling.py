@@ -1,4 +1,4 @@
-"""三模态传统模型、动态权重和融合逻辑。"""
+"""三模态四输出传统模型与动态融合逻辑。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from sklearn.base import BaseEstimator, clone
+from sklearn.base import BaseEstimator
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
 from sklearn.model_selection import GroupKFold
+from sklearn.multioutput import MultiOutputRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
@@ -39,7 +40,6 @@ def _resolve_worker_count(n_jobs: int, task_count: int) -> int:
     return max(1, min(task_count, n_jobs))
 
 
-# 配置和输出结构定义区。这里不做计算，只负责说明模型输入输出形状。
 @dataclass(frozen=True)
 class ModelConfig:
     """模型超参数集合。"""
@@ -66,52 +66,35 @@ class ModelConfig:
     xgb_colsample_bytree: float = 0.8
     xgb_reg_alpha: float = 0.1
     xgb_reg_lambda: float = 1.0
-    # CPU 并行配置，-1 表示让 joblib 按 cpu_count 分配；0/1 退化到串行。
     n_jobs: int = -1
 
 
 @dataclass
-class ComponentPrediction:
-    """单个组分的各路预测结果和动态权重。"""
+class ModalBranchArtifacts:
+    """三个模态四输出分支阶段的可复用产物。"""
 
-    predictions: dict[str, np.ndarray]
-    dynamic_weights: np.ndarray
+    modal_models: dict[str, "SingleModalityMultiOutputModel"]
+    modal_feature_scales: dict[str, np.ndarray]
+    modal_effective_pls_components: dict[str, int | None]
+    oof_base: np.ndarray
+    oof_weights: np.ndarray
+
+
+@dataclass
+class TraditionalPredictionCache:
+    """三模态四输出预测缓存。"""
+
     base_predictions: np.ndarray
-
-
-@dataclass
-class ComponentBranchPredictionCache:
-    """单组分测试集分支预测缓存，供多个 meta learner 复用。"""
-
-    base_predictions: np.ndarray
     dynamic_weights: np.ndarray
 
 
 @dataclass
-class MultiComponentPredictionCache:
-    """多组分测试集分支预测缓存。"""
-
-    components: list[ComponentBranchPredictionCache]
-
-
-@dataclass
-class MultiComponentPrediction:
-    """三个组分拼接后的整体预测结果。"""
+class TraditionalFusionPrediction:
+    """三模态四输出 + 融合输出的整体预测结果。"""
 
     raw: np.ndarray
     by_model: dict[str, np.ndarray]
     dynamic_weights: np.ndarray
-
-
-@dataclass
-class ComponentBranchArtifacts:
-    """单组分分支阶段的可复用产物。"""
-
-    branch_models: dict[str, Pipeline]
-    branch_feature_scales: dict[str, np.ndarray]
-    branch_effective_pls_components: dict[str, int]
-    oof_base: np.ndarray
-    oof_weights: np.ndarray
 
 
 def _safe_r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -124,7 +107,6 @@ def _safe_r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(r2_score(y_true, y_pred))
 
 
-# 基础工具函数区：构建分支模型、准备分支输入、估计扰动尺度。
 def _resolve_pls_n_components(config: ModelConfig, features: np.ndarray | None = None) -> int:
     """按当前输入规模约束 PLS 组件数。"""
 
@@ -135,45 +117,51 @@ def _resolve_pls_n_components(config: ModelConfig, features: np.ndarray | None =
     return min(config.pls_n_components, features.shape[0], features.shape[1])
 
 
-def _make_pipeline(config: ModelConfig, features: np.ndarray | None = None) -> Pipeline:
-    """按配置为单一路模态构造回归流水线。"""
+def _make_modal_pipeline(config: ModelConfig, features: np.ndarray | None = None) -> Pipeline:
+    """为四输出模态模型构造回归流水线。"""
 
     if config.branch_model_type == "svr":
-        estimator = SVR(kernel="rbf", C=config.C, epsilon=config.epsilon, gamma=config.gamma)
-        return Pipeline([
-            ("scaler", StandardScaler()),
-            ("svr", estimator),
-        ])
+        estimator = MultiOutputRegressor(SVR(kernel="rbf", C=config.C, epsilon=config.epsilon, gamma=config.gamma))
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("svr", estimator),
+            ]
+        )
     if config.branch_model_type == "pls":
-        return Pipeline([
-            ("scaler", StandardScaler()),
-            ("pls", PLSRegression(n_components=_resolve_pls_n_components(config, features))),
-        ])
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("pls", PLSRegression(n_components=_resolve_pls_n_components(config, features))),
+            ]
+        )
     if config.branch_model_type == "xgboost":
-        return Pipeline([
-            ("scaler", StandardScaler()),
-            (
-                "xgb",
-                XGBRegressor(
-                    n_estimators=config.xgb_n_estimators,
-                    max_depth=config.xgb_max_depth,
-                    learning_rate=config.xgb_learning_rate,
-                    tree_method="hist",
-                    device=config.xgb_device,
-                    n_jobs=config.xgb_n_jobs,
-                    subsample=config.xgb_subsample,
-                    colsample_bytree=config.xgb_colsample_bytree,
-                    reg_alpha=config.xgb_reg_alpha,
-                    reg_lambda=config.xgb_reg_lambda,
-                    random_state=config.random_state,
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "xgb",
+                    XGBRegressor(
+                        n_estimators=config.xgb_n_estimators,
+                        max_depth=config.xgb_max_depth,
+                        learning_rate=config.xgb_learning_rate,
+                        tree_method="hist",
+                        device=config.xgb_device,
+                        n_jobs=config.xgb_n_jobs,
+                        subsample=config.xgb_subsample,
+                        colsample_bytree=config.xgb_colsample_bytree,
+                        reg_alpha=config.xgb_reg_alpha,
+                        reg_lambda=config.xgb_reg_lambda,
+                        random_state=config.random_state,
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
     raise ValueError(f"Unknown branch_model_type: {config.branch_model_type}")
 
 
 def _make_meta_model(config: ModelConfig, features: np.ndarray | None = None) -> BaseEstimator:
-    """按配置构造元学习器。"""
+    """按配置构造四输出融合器。"""
 
     if config.meta_model_type == "ridge":
         return Ridge(alpha=config.ridge_alpha)
@@ -196,39 +184,10 @@ def _make_meta_model(config: ModelConfig, features: np.ndarray | None = None) ->
     raise ValueError(f"Unknown meta_model_type: {config.meta_model_type}")
 
 
-def _fit_branch_model(
-    prototype: Pipeline,
-    config: ModelConfig,
-    features: np.ndarray,
-    target: np.ndarray,
-) -> Pipeline:
-    """按分支模型类型克隆或重建估计器，再拟合当前输入。"""
-
-    if config.branch_model_type == "pls" and isinstance(prototype, Pipeline):
-        model = _make_pipeline(config, features)
-    else:
-        model = clone(prototype)
-    return model.fit(features, target)
-
-
-def _active_model_names(config: ModelConfig) -> tuple[str, ...]:
-    """返回当前配置下实际会产出的模型名称。"""
-
-    return (
-        "acoustic",
-        "optical",
-        "thermal",
-        "fixed_average",
-        "dynamic_average",
-        f"dynamic_{config.meta_model_type}",
-    )
-
-
 def _branch_inputs(dataset: PatentDataset, include_environment: bool) -> dict[str, np.ndarray]:
     """为三条模态分支准备输入矩阵，可选拼接环境变量。"""
 
     if include_environment:
-        # 环境参数目前直接拼接进各模态分支，后续可改成显式补偿项。
         return {
             "acoustic": np.hstack([dataset.acoustic, dataset.environment]),
             "optical": np.hstack([dataset.optical, dataset.environment]),
@@ -251,47 +210,45 @@ def _feature_scales(inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return scales
 
 
-def _compute_dynamic_weights(
+def _modal_meta_features(base_predictions: np.ndarray, dynamic_weights: np.ndarray) -> np.ndarray:
+    """把三模态四输出基础预测和权重展平成融合器输入。"""
+
+    sample_count = base_predictions.shape[0]
+    return np.hstack(
+        [
+            base_predictions.reshape(sample_count, -1),
+            (base_predictions * dynamic_weights).reshape(sample_count, -1),
+            dynamic_weights.reshape(sample_count, -1),
+        ]
+    )
+
+
+def _compute_modal_dynamic_weights(
     branch_inputs: dict[str, np.ndarray],
     base_predictions: np.ndarray,
-    branch_models: dict[str, Pipeline],
+    modal_models: dict[str, "SingleModalityMultiOutputModel"],
     feature_scales: dict[str, np.ndarray],
     config: ModelConfig,
     seed_offset: int = 0,
 ) -> np.ndarray:
-    """用 MC 扰动估计分支稳定性，再换算成动态权重。"""
+    """用 MC 扰动估计三模态四输出预测的稳定性权重。"""
 
     rng = np.random.default_rng(config.random_state + seed_offset)
-    n_samples = base_predictions.shape[0]
-    n_perturb = config.n_perturbations
-    drift_mse = np.zeros((n_samples, len(BRANCH_NAMES)), dtype=float)
-    # 对每一条模态分支分别做扰动，得到“当前样本下这一路有多稳定”的估计。
-    # 旧实现是 24 次小批量 predict 串行；这里一次性生成全部扰动样本，
-    # 合成 (n_perturb * n_samples, n_features) 的大批量再单次 predict。
-    # 注意：随机数生成顺序与原实现不同，drift_mse 数值会有统计等价的微小差异，
-    # 但权重分布性质和分支稳定性排序保持一致。
+    n_samples, n_components, _ = base_predictions.shape
+    drift_mse = np.zeros((n_samples, n_components, len(BRANCH_NAMES)), dtype=float)
     for branch_idx, branch_name in enumerate(BRANCH_NAMES):
         features = branch_inputs[branch_name]
         scale = feature_scales[branch_name] * config.perturbation_scale
         n_features = features.shape[1]
-        # rng.normal 默认 loc=0, scale=1，再按列乘以 scale 完成各维度独立扰动。
-        # shape: (n_perturb, n_samples, n_features)
-        noise = rng.standard_normal((n_perturb, n_samples, n_features)) * scale
+        noise = rng.standard_normal((config.n_perturbations, n_samples, n_features)) * scale
         perturbed = features[None, :, :] + noise
-        flat = perturbed.reshape(n_perturb * n_samples, n_features)
-        flat_pred = branch_models[branch_name].predict(flat)
-        # 还原回 (n_samples, n_perturb) 方便统一计算 drift_mse。
-        perturb_array = flat_pred.reshape(n_perturb, n_samples).T
-        drift_mse[:, branch_idx] = np.mean((perturb_array - base_predictions[:, [branch_idx]]) ** 2, axis=1)
-    # 置信度取 drift_mse 的倒数，再归一化成每个样本三路权重和为 1。
+        flat = perturbed.reshape(config.n_perturbations * n_samples, n_features)
+        flat_pred = modal_models[branch_name].predict(flat)
+        perturb_array = flat_pred.reshape(config.n_perturbations, n_samples, n_components).transpose(1, 2, 0)
+        baseline = base_predictions[:, :, branch_idx][:, :, None]
+        drift_mse[:, :, branch_idx] = np.mean((perturb_array - baseline) ** 2, axis=2)
     confidence = 1.0 / (drift_mse + config.uncertainty_floor)
-    return confidence / confidence.sum(axis=1, keepdims=True)
-
-
-def _meta_features(base_predictions: np.ndarray, dynamic_weights: np.ndarray) -> np.ndarray:
-    """把基础预测、加权交互项和权重本身拼成元学习器输入。"""
-
-    return np.hstack([base_predictions, base_predictions * dynamic_weights, dynamic_weights])
+    return confidence / confidence.sum(axis=2, keepdims=True)
 
 
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -308,117 +265,131 @@ def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, flo
     }
 
 
-# 单组分建模区：一套三模态 SVR + 一个 Ridge 元学习器。
-class SingleComponentPatentModel:
-    """针对单个目标组分的一套三模态模型。"""
+def _active_modal_model_names() -> tuple[str, ...]:
+    return ("acoustic", "optical", "thermal", "fused")
 
-    def __init__(self, config: ModelConfig | None = None) -> None:
+
+class SingleModalityMultiOutputModel:
+    """单个模态的四输出基学习器。"""
+
+    def __init__(self, config: ModelConfig, modality: str) -> None:
+        self.config = config
+        self.modality = modality
+        self.model: Pipeline | None = None
+        self.effective_pls_components: int | None = None
+
+    def fit(self, features: np.ndarray, targets: np.ndarray) -> "SingleModalityMultiOutputModel":
+        if self.config.branch_model_type == "pls":
+            self.effective_pls_components = _resolve_pls_n_components(self.config, features)
+        else:
+            self.effective_pls_components = None
+        self.model = _make_modal_pipeline(self.config, features)
+        self.model.fit(features, targets)
+        return self
+
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            raise ValueError(f"{self.modality} model has not been fitted yet.")
+        prediction = np.asarray(self.model.predict(features), dtype=float)
+        if prediction.ndim == 1:
+            prediction = prediction[:, None]
+        return prediction
+
+
+class TraditionalFusionModel:
+    """三模态四输出 + 动态权重 + 二次融合模型。"""
+
+    def __init__(self, config: ModelConfig | None = None, component_names: tuple[str, ...] = COMPONENT_NAMES) -> None:
         self.config = config or ModelConfig()
-        self.branch_models = {name: _make_pipeline(self.config) for name in BRANCH_NAMES}
+        self.component_names = component_names
+        self.modal_models = {name: SingleModalityMultiOutputModel(self.config, name) for name in BRANCH_NAMES}
         self.meta_model = _make_meta_model(self.config)
-        self.branch_feature_scales: dict[str, np.ndarray] = {}
-        self.branch_effective_pls_components: dict[str, int] = {}
+        self.modal_feature_scales: dict[str, np.ndarray] = {}
+        self.modal_effective_pls_components: dict[str, int | None] = {name: None for name in BRANCH_NAMES}
         self.meta_effective_pls_components: int | None = None
 
-    def fit_branch_stage(self, dataset: PatentDataset, target: np.ndarray) -> ComponentBranchArtifacts:
-        """拟合分支模型并产出可复用的 OOF 特征。"""
-
+    def fit_branch_stage(self, dataset: PatentDataset) -> ModalBranchArtifacts:
+        if dataset.targets.shape[1] != len(self.component_names):
+            raise ValueError("Dataset target width does not match component_names.")
         inputs = _branch_inputs(dataset, self.config.include_environment)
         groups = dataset.metadata["mixture_id"].to_numpy(dtype=object)
-        oof_base, oof_weights = self._oof_meta_inputs(inputs, target, groups)
-        branch_effective_pls_components: dict[str, int] = {}
-        branch_models: dict[str, Pipeline] = {}
-        for branch_name in BRANCH_NAMES:
-            if self.config.branch_model_type == "pls":
-                branch_effective_pls_components[branch_name] = _resolve_pls_n_components(self.config, inputs[branch_name])
-            branch_models[branch_name] = _fit_branch_model(
-                self.branch_models[branch_name],
-                self.config,
-                inputs[branch_name],
-                target,
-            )
-        return ComponentBranchArtifacts(
-            branch_models=branch_models,
-            branch_feature_scales=_feature_scales(inputs),
-            branch_effective_pls_components=branch_effective_pls_components,
+        oof_base, oof_weights = self._oof_meta_inputs(inputs, dataset.targets, groups)
+
+        def _fit_modal(branch_name: str) -> tuple[str, SingleModalityMultiOutputModel]:
+            model = SingleModalityMultiOutputModel(self.config, branch_name).fit(inputs[branch_name], dataset.targets)
+            return branch_name, model
+
+        n_workers = _resolve_worker_count(self.config.n_jobs, len(BRANCH_NAMES))
+        if n_workers > 1:
+            fitted_results = Parallel(n_jobs=n_workers, prefer="threads")(delayed(_fit_modal)(branch_name) for branch_name in BRANCH_NAMES)
+        else:
+            fitted_results = [_fit_modal(branch_name) for branch_name in BRANCH_NAMES]
+
+        modal_models: dict[str, SingleModalityMultiOutputModel] = {}
+        modal_effective_pls_components: dict[str, int | None] = {}
+        for branch_name, model in fitted_results:
+            modal_models[branch_name] = model
+            modal_effective_pls_components[branch_name] = model.effective_pls_components
+
+        return ModalBranchArtifacts(
+            modal_models=modal_models,
+            modal_feature_scales=_feature_scales(inputs),
+            modal_effective_pls_components=modal_effective_pls_components,
             oof_base=oof_base,
             oof_weights=oof_weights,
         )
 
-    def fit_meta_stage(self, target: np.ndarray, branch_artifacts: ComponentBranchArtifacts) -> "SingleComponentPatentModel":
-        """基于可复用分支产物拟合当前元学习器。"""
-
-        meta_inputs = _meta_features(branch_artifacts.oof_base, branch_artifacts.oof_weights)
+    def fit_meta_stage(self, targets: np.ndarray, branch_artifacts: ModalBranchArtifacts) -> "TraditionalFusionModel":
+        meta_inputs = _modal_meta_features(branch_artifacts.oof_base, branch_artifacts.oof_weights)
         self.meta_effective_pls_components = None
         if self.config.meta_model_type == "pls":
             self.meta_effective_pls_components = _resolve_pls_n_components(self.config, meta_inputs)
         self.meta_model = _make_meta_model(self.config, meta_inputs)
-        self.meta_model.fit(meta_inputs, target)
-        self.branch_models = branch_artifacts.branch_models
-        self.branch_feature_scales = branch_artifacts.branch_feature_scales
-        self.branch_effective_pls_components = branch_artifacts.branch_effective_pls_components
+        self.meta_model.fit(meta_inputs, targets)
+        self.modal_models = branch_artifacts.modal_models
+        self.modal_feature_scales = branch_artifacts.modal_feature_scales
+        self.modal_effective_pls_components = branch_artifacts.modal_effective_pls_components
         return self
 
-    def fit(
-        self,
-        dataset: PatentDataset,
-        target: np.ndarray,
-        branch_artifacts: ComponentBranchArtifacts | None = None,
-    ) -> "SingleComponentPatentModel":
-        """先做组内隔离的 OOF 融合训练，再拟合当前元学习器。"""
-
+    def fit(self, dataset: PatentDataset, branch_artifacts: ModalBranchArtifacts | None = None) -> "TraditionalFusionModel":
         if branch_artifacts is None:
-            branch_artifacts = self.fit_branch_stage(dataset, target)
-        self.fit_meta_stage(target, branch_artifacts)
+            branch_artifacts = self.fit_branch_stage(dataset)
+        self.fit_meta_stage(dataset.targets, branch_artifacts)
         return self
 
     def _oof_meta_inputs(
         self,
         inputs: dict[str, np.ndarray],
-        target: np.ndarray,
+        targets: np.ndarray,
         groups: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """生成元学习器训练所需的 OOF 基础预测和 OOF 动态权重。"""
-
-        n_samples = target.shape[0]
-        base = np.zeros((n_samples, len(BRANCH_NAMES)), dtype=float)
+        n_samples, n_components = targets.shape
+        base = np.zeros((n_samples, n_components, len(BRANCH_NAMES)), dtype=float)
         weights = np.zeros_like(base)
         n_groups = np.unique(groups).size
         n_splits = min(self.config.stacking_folds, n_groups)
         if n_splits < 2:
-            logger.warning(
-                "OOF fallback: only %d unique group(s) available for stacking_folds=%d; "
-                "using in-sample branch predictions for meta inputs.",
-                n_groups,
-                self.config.stacking_folds,
+            raise ValueError(
+                f"Only {n_groups} unique group(s) available but stacking requires "
+                f"at least 2 (stacking_folds={self.config.stacking_folds}). "
+                f"Increase training data diversity or reduce stacking_folds."
             )
-            fitted = {
-                name: _fit_branch_model(self.branch_models[name], self.config, inputs[name], target)
-                for name in BRANCH_NAMES
-            }
-            base_predictions = np.column_stack([fitted[name].predict(inputs[name]) for name in BRANCH_NAMES])
-            return base_predictions, _compute_dynamic_weights(inputs, base_predictions, fitted, _feature_scales(inputs), self.config)
 
         first_input = next(iter(inputs.values()))
         splitter = GroupKFold(n_splits=n_splits, shuffle=True, random_state=self.config.random_state)
-        splits = list(splitter.split(first_input, target, groups))
+        splits = list(splitter.split(first_input, targets, groups))
 
         def _process_fold(fold_idx: int, train_idx: np.ndarray, valid_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-            """单折拟合 + 验证折预测 + 动态权重，合成可并行的任务单元。"""
-
             train_inputs = {name: values[train_idx] for name, values in inputs.items()}
             valid_inputs = {name: values[valid_idx] for name, values in inputs.items()}
-            # 每一折都保证同一个 mixture_id 不会同时出现在训练和验证里。
-            fitted: dict[str, Pipeline] = {}
+            fitted: dict[str, SingleModalityMultiOutputModel] = {}
             for branch_name in BRANCH_NAMES:
-                fitted[branch_name] = _fit_branch_model(
-                    self.branch_models[branch_name],
-                    self.config,
+                fitted[branch_name] = SingleModalityMultiOutputModel(self.config, branch_name).fit(
                     train_inputs[branch_name],
-                    target[train_idx],
+                    targets[train_idx],
                 )
-            base_valid = np.column_stack([fitted[name].predict(valid_inputs[name]) for name in BRANCH_NAMES])
-            weight_valid = _compute_dynamic_weights(
+            base_valid = np.stack([fitted[name].predict(valid_inputs[name]) for name in BRANCH_NAMES], axis=2)
+            weight_valid = _compute_modal_dynamic_weights(
                 valid_inputs,
                 base_valid,
                 fitted,
@@ -428,8 +399,6 @@ class SingleComponentPatentModel:
             )
             return valid_idx, base_valid, weight_valid
 
-        # SVR/PLS/XGBoost 的 fit 在底层 C 实现里会释放 GIL，threading backend
-        # 既能并行又不会触发 pickle 开销。n_jobs=-1 表示按 cpu_count 分配。
         n_workers = _resolve_worker_count(self.config.n_jobs, len(splits))
         if n_workers > 1:
             fold_results = Parallel(n_jobs=n_workers, prefer="threads")(
@@ -446,131 +415,51 @@ class SingleComponentPatentModel:
             weights[valid_idx] = weight_valid
         return base, weights
 
-    def predict_branches(self, dataset: PatentDataset) -> ComponentBranchPredictionCache:
-        """计算可跨 meta learner 复用的分支预测和动态权重。"""
-
+    def predict_branches(self, dataset: PatentDataset) -> TraditionalPredictionCache:
         inputs = _branch_inputs(dataset, self.config.include_environment)
-        base_predictions = np.column_stack([self.branch_models[name].predict(inputs[name]) for name in BRANCH_NAMES])
-        dynamic_weights = _compute_dynamic_weights(
+        base_predictions = np.stack([self.modal_models[name].predict(inputs[name]) for name in BRANCH_NAMES], axis=2)
+        dynamic_weights = _compute_modal_dynamic_weights(
             inputs,
             base_predictions,
-            self.branch_models,
-            self.branch_feature_scales,
+            self.modal_models,
+            self.modal_feature_scales,
             self.config,
         )
-        return ComponentBranchPredictionCache(base_predictions=base_predictions, dynamic_weights=dynamic_weights)
+        return TraditionalPredictionCache(base_predictions=base_predictions, dynamic_weights=dynamic_weights)
 
-    def predict(self, dataset: PatentDataset, prediction_cache: ComponentBranchPredictionCache | None = None) -> ComponentPrediction:
-        """输出单个组分的单模态结果、两种平均融合和最终元学习融合。"""
-
+    def predict(
+        self,
+        dataset: PatentDataset,
+        prediction_cache: TraditionalPredictionCache | None = None,
+    ) -> TraditionalFusionPrediction:
         if prediction_cache is None:
             prediction_cache = self.predict_branches(dataset)
         base_predictions = prediction_cache.base_predictions
         dynamic_weights = prediction_cache.dynamic_weights
-        fixed_average = base_predictions.mean(axis=1)
-        dynamic_average = np.sum(base_predictions * dynamic_weights, axis=1)
-        meta_key = f"dynamic_{self.config.meta_model_type}"
-        meta_prediction = self.meta_model.predict(_meta_features(base_predictions, dynamic_weights))
-        return ComponentPrediction(
-            predictions={
-                "acoustic": base_predictions[:, 0],
-                "optical": base_predictions[:, 1],
-                "thermal": base_predictions[:, 2],
-                "fixed_average": fixed_average,
-                "dynamic_average": dynamic_average,
-                meta_key: meta_prediction,
-            },
-            dynamic_weights=dynamic_weights,
-            base_predictions=base_predictions,
-        )
-
-
-# 多组分封装区：把单组分流程重复到 H2、CH4、CO2 三个目标上。
-class MultiComponentPatentModel:
-    """把单组分模型复制三份，分别预测 H2、CH4、CO2。"""
-
-    def __init__(self, config: ModelConfig | None = None, component_names: tuple[str, ...] = COMPONENT_NAMES) -> None:
-        self.config = config or ModelConfig()
-        self.component_names = component_names
-        self.models = [SingleComponentPatentModel(self.config) for _ in component_names]
-
-    def predict_branches(self, dataset: PatentDataset) -> MultiComponentPredictionCache:
-        """计算多组分分支预测缓存，供同一 branch 下多个 meta learner 复用。"""
-
-        return MultiComponentPredictionCache(components=[model.predict_branches(dataset) for model in self.models])
-
-    def fit_branch_stage(self, dataset: PatentDataset) -> list[ComponentBranchArtifacts]:
-        """按组分拟合分支阶段，供多个元学习器复用。"""
-
-        if dataset.targets.shape[1] != len(self.component_names):
-            raise ValueError("Dataset target width does not match component_names.")
-        # 各组分的 fit_branch_stage 互不依赖；threading backend + SVR 释放 GIL
-        # 让 component 维度也能并行，吃满多核。
-        n_workers = _resolve_worker_count(self.config.n_jobs, len(self.models))
-        logger.debug(
-            "fit_branch_stage components=%d n_workers=%d",
-            len(self.models),
-            n_workers,
-        )
-        if n_workers > 1:
-            return Parallel(n_jobs=n_workers, prefer="threads")(
-                delayed(model.fit_branch_stage)(dataset, dataset.target_for(component_idx))
-                for component_idx, model in enumerate(self.models)
-            )
-        return [
-            model.fit_branch_stage(dataset, dataset.target_for(component_idx))
-            for component_idx, model in enumerate(self.models)
-        ]
-
-    def fit(
-        self,
-        dataset: PatentDataset,
-        branch_artifacts: list[ComponentBranchArtifacts] | None = None,
-    ) -> "MultiComponentPatentModel":
-        """按组分逐个拟合模型。"""
-
-        if dataset.targets.shape[1] != len(self.component_names):
-            raise ValueError("Dataset target width does not match component_names.")
-        if branch_artifacts is None:
-            branch_artifacts = self.fit_branch_stage(dataset)
-        if len(branch_artifacts) != len(self.models):
-            raise ValueError("branch_artifacts length does not match component_names.")
-        for component_idx, model in enumerate(self.models):
-            model.fit(dataset, dataset.target_for(component_idx), branch_artifacts=branch_artifacts[component_idx])
-        return self
-
-    def predict(self, dataset: PatentDataset, prediction_cache: MultiComponentPredictionCache | None = None) -> MultiComponentPrediction:
-        """汇总三个组分在各个模型家族下的预测矩阵。"""
-
-        if prediction_cache is not None and len(prediction_cache.components) != len(self.models):
-            raise ValueError("prediction_cache component count does not match component_names.")
-        component_predictions = [
-            model.predict(
-                dataset,
-                prediction_cache=None if prediction_cache is None else prediction_cache.components[component_idx],
-            )
-            for component_idx, model in enumerate(self.models)
-        ]
-        by_model: dict[str, np.ndarray] = {}
-        # 把每个组分的一维输出按列拼回 (n_samples, 3) 的矩阵。
-        for model_name in _active_model_names(self.config):
-            by_model[model_name] = np.column_stack([prediction.predictions[model_name] for prediction in component_predictions])
-        raw = by_model[f"dynamic_{self.config.meta_model_type}"]
-        weights = np.stack([prediction.dynamic_weights for prediction in component_predictions], axis=1)
-        return MultiComponentPrediction(raw=raw, by_model=by_model, dynamic_weights=weights)
+        meta_prediction = np.asarray(self.meta_model.predict(_modal_meta_features(base_predictions, dynamic_weights)), dtype=float)
+        if meta_prediction.ndim == 1:
+            meta_prediction = meta_prediction[:, None]
+        by_model = {
+            "acoustic": base_predictions[:, :, 0],
+            "optical": base_predictions[:, :, 1],
+            "thermal": base_predictions[:, :, 2],
+            "fused": meta_prediction,
+        }
+        return TraditionalFusionPrediction(raw=by_model["fused"], by_model=by_model, dynamic_weights=dynamic_weights)
 
     def evaluate(
         self,
         dataset: PatentDataset,
-        prediction_cache: MultiComponentPredictionCache | None = None,
-    ) -> tuple[pd.DataFrame, MultiComponentPrediction]:
-        """对每个模型家族、每个组分分别计算误差指标。"""
-
+        prediction_cache: TraditionalPredictionCache | None = None,
+    ) -> tuple[pd.DataFrame, TraditionalFusionPrediction]:
         prediction = self.predict(dataset, prediction_cache=prediction_cache)
         rows: list[dict[str, object]] = []
-        # 输出是长表结构，方便后续直接 groupby 或画图。
-        for model_name, values in prediction.by_model.items():
+        for model_name in _active_modal_model_names():
+            values = prediction.by_model[model_name]
             for component_idx, component_name in enumerate(self.component_names):
-                metrics = _regression_metrics(dataset.targets[:, component_idx], values[:, component_idx])
-                rows.append({"model": model_name, "component": component_name, **metrics})
+                rows.append({"model": model_name, "component": component_name, **_regression_metrics(dataset.targets[:, component_idx], values[:, component_idx])})
         return pd.DataFrame(rows), prediction
+
+
+# Compatibility aliases for unchanged imports in downstream scripts.
+MultiComponentPatentModel = TraditionalFusionModel

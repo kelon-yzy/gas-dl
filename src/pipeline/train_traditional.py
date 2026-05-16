@@ -33,6 +33,7 @@ def main() -> None:
     parser.add_argument("--xgb-n-jobs", type=int, default=None)
     parser.add_argument("--n-perturbations", type=int, default=None)
     parser.add_argument("--stacking-folds", type=int, default=None)
+    parser.add_argument("--stage-filter", default="stable", choices=("none", "stable"))
     parser.add_argument("--ui", action="store_true")
     parser.add_argument("--no-ui", action="store_true")
     args = parser.parse_args()
@@ -53,6 +54,7 @@ def main() -> None:
         "--seed", str(args.seed),
         "--component-mode", "four",
         "--max-workers", str(args.max_workers),
+        "--stage-filter", args.stage_filter,
     ]
     if args.train_limit is not None:
         argv.extend(["--train-limit", str(args.train_limit)])

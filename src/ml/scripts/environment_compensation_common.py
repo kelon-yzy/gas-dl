@@ -71,7 +71,7 @@ def base_feature_profile(profile: str) -> str:
 
     mapping = {
         "v3_raw_no_env": "v3_waveform_dual_channel_four",
-        "v3_raw_tph": "v3_waveform_dual_channel_four",
+        "v3_raw_tph": "v3_waveform_dual_channel_tph_four",
         "v3_env": "v3_waveform_dual_channel_env_four",
     }
     if profile not in mapping:
@@ -88,17 +88,7 @@ def resolve_feature_profile_name(profile: str, component_mode: str) -> str:
     return base
 
 
-def build_meta_key(meta_model_type: str) -> str:
-    """返回当前元学习器对应的预测输出键名。"""
-
-    return f"dynamic_{meta_model_type}"
-
-
-def require_known_profile(profile: str) -> None:
-    """校验实验脚本声明的 profile 在基础配置中存在。"""
-
-    if base_feature_profile(profile) not in FEATURE_PROFILES:
-        raise ValueError(f"Unknown profile configured for experiment: {profile}")
+META_KEY = "fused"
 
 
 def require_known_profile_mode(profile: str, component_mode: str) -> None:

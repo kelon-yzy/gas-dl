@@ -23,6 +23,8 @@ from patent_model.feature_profiles import get_feature_profile
 
 
 METADATA_FILTER_CHOICES = ("none", "detection")
+STAGE_FILTER_CHOICES = ("none", "stable")
+STABLE_STAGE_IDS = ("distance_stage", "pressure_stage")
 QUALITY_FILTER_CHOICES = ("none", "strict")
 DUPLICATE_FILTER_CHOICES = ("none", "per_mixture_limit")
 DETECTION_STATUSES = ("synthetic_measurement",)
@@ -90,6 +92,15 @@ def _normalize_quality_filter(filter_name: str, filter_value: str | None) -> str
     mode = "none" if filter_value is None else str(filter_value).strip().lower()
     if mode not in QUALITY_FILTER_CHOICES:
         raise ValueError(f"Unknown {filter_name}: {filter_value}. Expected one of {QUALITY_FILTER_CHOICES}.")
+    return mode
+
+
+def _normalize_stage_filter(stage_filter: str | None) -> str:
+    """规范化阶段筛选模式，未知模式直接报错。"""
+
+    mode = "none" if stage_filter is None else str(stage_filter).strip().lower()
+    if mode not in STAGE_FILTER_CHOICES:
+        raise ValueError(f"Unknown stage_filter: {stage_filter}. Expected one of {STAGE_FILTER_CHOICES}.")
     return mode
 
 
@@ -226,6 +237,40 @@ def _apply_metadata_filter(dataset: PatentDataset, metadata_filter: str) -> Pate
     }
     filter_report = dict(dataset.filter_report)
     filter_report["metadata_filter"] = report
+    return replace(filtered, filter_report=filter_report)
+
+
+def _apply_stage_filter(dataset: PatentDataset, stage_filter: str) -> PatentDataset:
+    """按采样阶段筛选稳定检测样本。"""
+
+    if stage_filter == "none":
+        return dataset
+    if stage_filter != "stable":
+        raise ValueError(f"Unknown stage_filter: {stage_filter}.")
+
+    before_frame = _metadata_stats_frame(dataset)
+    before_stats = _stats_dict(before_frame)
+    keep_mask = dataset.metadata["stage_id"].isin(STABLE_STAGE_IDS)
+    keep_indices = np.flatnonzero(keep_mask.to_numpy(dtype=bool))
+    if keep_indices.size == 0:
+        raise ValueError(f"stage_filter={stage_filter} removed all samples.")
+
+    filtered = dataset.subset(keep_indices)
+    after_frame = _metadata_stats_frame(filtered)
+    after_stats = _stats_dict(after_frame)
+    report = {
+        "mode": stage_filter,
+        "criteria": {"stage_id_in": list(STABLE_STAGE_IDS)},
+        "before_samples": int(dataset.n_samples),
+        "after_samples": int(filtered.n_samples),
+        "removed_samples": int(dataset.n_samples - filtered.n_samples),
+        "before_unique_mixtures": int(before_stats["unique_mixtures"]),
+        "after_unique_mixtures": int(after_stats["unique_mixtures"]),
+        "before": before_stats,
+        "after": after_stats,
+    }
+    filter_report = dict(dataset.filter_report)
+    filter_report["stage_filter"] = report
     return replace(filtered, filter_report=filter_report)
 
 
@@ -381,6 +426,7 @@ def load_patent_dataset(
     data_dir: str | Path,
     profile: str = "raw_tph",
     metadata_filter: str | None = "none",
+    stage_filter: str | None = "none",
     physical_range_filter: str | None = "none",
     label_closure_filter: str | None = "none",
     duplicate_filter: str | None = "none",
@@ -392,6 +438,7 @@ def load_patent_dataset(
     # 第 1 步：读取训练、标签、工况和补充特征表。
     base = Path(data_dir)
     metadata_filter_mode = _normalize_metadata_filter(metadata_filter)
+    stage_filter_mode = _normalize_stage_filter(stage_filter)
     physical_range_filter_mode = _normalize_quality_filter("physical_range_filter", physical_range_filter)
     label_closure_filter_mode = _normalize_quality_filter("label_closure_filter", label_closure_filter)
     duplicate_filter_mode = _normalize_duplicate_filter(duplicate_filter)
@@ -508,6 +555,7 @@ def load_patent_dataset(
         },
     )
     dataset = _apply_metadata_filter(dataset, metadata_filter_mode)
+    dataset = _apply_stage_filter(dataset, stage_filter_mode)
     dataset = _apply_physical_range_filter(dataset, physical_range_filter_mode)
     dataset = _apply_label_closure_filter(dataset, label_closure_filter_mode)
     dataset = _apply_duplicate_filter(dataset, duplicate_filter_mode, duplicate_per_mixture_limit, duplicate_filter_seed)

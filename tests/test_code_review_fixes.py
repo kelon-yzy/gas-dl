@@ -18,8 +18,8 @@ from data.dataset_waveform import WaveformSequenceDataset
 from patent_model.data_loader import load_patent_dataset
 from patent_model.dataset import PatentDataset
 from patent_model.fault_labels import inject_faults
-from patent_model.modeling import ModelConfig, SingleComponentPatentModel
-from patent_model.robustness import add_environment_noise, select_pressure_slice
+from patent_model.modeling import ModelConfig, TraditionalFusionModel
+from patent_model.robustness import add_environment_noise, add_profile_environment_noise, select_pressure_slice
 from training.seed import set_seed
 from training.train import _ensure_scaler_path, _forward_batch
 
@@ -62,21 +62,21 @@ class CodeReviewFixTests(unittest.TestCase):
             self.assertEqual(transformed.provenance, dataset.provenance)
             self.assertEqual(transformed.filter_report, dataset.filter_report)
 
-    def test_oof_degenerate_path_emits_warning(self) -> None:
+    def test_oof_degenerate_path_raises_for_single_group(self) -> None:
+        """Original test updated: OOF with single group now raises ValueError."""
+
         config = ModelConfig(stacking_folds=5, n_perturbations=1, random_state=7)
-        model = SingleComponentPatentModel(config)
+        model = TraditionalFusionModel(config, component_names=("H2", "CH4", "CO2", "N2"))
         inputs = {
             "acoustic": np.arange(15, dtype=float).reshape(5, 3),
             "optical": np.arange(15, 30, dtype=float).reshape(5, 3),
             "thermal": np.arange(30, 45, dtype=float).reshape(5, 3),
         }
-        target = np.linspace(0.0, 1.0, 5)
+        target = np.linspace(0.0, 1.0, 20).reshape(5, 4)
         groups = np.array(["M1", "M1", "M1", "M1", "M1"], dtype=object)
 
-        with self.assertLogs("patent_model.modeling", level="WARNING") as captured:
+        with self.assertRaises(ValueError):
             model._oof_meta_inputs(inputs, target, groups)
-
-        self.assertTrue(any("OOF fallback" in message for message in captured.output))
 
     def test_model_forward_uses_declared_input_format(self) -> None:
         class NCTModel(torch.nn.Module):
@@ -239,6 +239,84 @@ class CodeReviewFixTests(unittest.TestCase):
 
         self.assertTrue(torch.backends.cudnn.deterministic)
         self.assertFalse(torch.backends.cudnn.benchmark)
+
+    def test_v3_env_profile_noise_propagates_to_embedded_columns(self) -> None:
+        """T-P2-T1: verify that environment noise reaches embedded T_C/P_MPa/H_RH in acoustic matrix."""
+
+        from patent_model.feature_profiles import DUAL_WAVEFORM_ACOUSTIC_ENV_COLUMNS, DUAL_WAVEFORM_OPTICAL_ENV_COLUMNS, DUAL_WAVEFORM_THERMAL_ENV_COLUMNS
+
+        n = 5
+        n_acoustic = len(DUAL_WAVEFORM_ACOUSTIC_ENV_COLUMNS)
+        n_optical = len(DUAL_WAVEFORM_OPTICAL_ENV_COLUMNS)
+        n_thermal = len(DUAL_WAVEFORM_THERMAL_ENV_COLUMNS)
+        sample_ids = np.array([f"S{i}" for i in range(n)], dtype=object)
+        metadata = pd.DataFrame({"sample_id": sample_ids, "mixture_id": [f"M{i}" for i in range(n)]})
+        dataset = PatentDataset(
+            sample_ids=sample_ids,
+            acoustic=np.random.default_rng(0).standard_normal((n, n_acoustic)),
+            optical=np.random.default_rng(1).standard_normal((n, n_optical)),
+            thermal=np.random.default_rng(2).standard_normal((n, n_thermal)),
+            environment=np.array([[25.0, 0.10, 40.0]] * n),
+            targets=np.random.default_rng(3).standard_normal((n, 4)),
+            component_names=("H2", "CH4", "CO2", "N2"),
+            metadata=metadata,
+            acoustic_columns=DUAL_WAVEFORM_ACOUSTIC_ENV_COLUMNS,
+            optical_columns=DUAL_WAVEFORM_OPTICAL_ENV_COLUMNS,
+            thermal_columns=DUAL_WAVEFORM_THERMAL_ENV_COLUMNS,
+            environment_columns=("T_C", "P_MPa", "H_RH"),
+            provenance={"source": "unit-test"},
+            filter_report={},
+        )
+
+        noisy = add_profile_environment_noise(
+            dataset,
+            profile="v3_waveform_dual_channel_env_four",
+            sigma_t=10.0,
+            sigma_p=0.05,
+            sigma_h=5.0,
+            seed=42,
+        )
+
+        t_c_idx = DUAL_WAVEFORM_ACOUSTIC_ENV_COLUMNS.index("T_C")
+        self.assertFalse(
+            np.allclose(dataset.acoustic[:, t_c_idx], noisy.acoustic[:, t_c_idx]),
+            "Embedded T_C column in acoustic matrix must change after environment noise injection",
+        )
+        p_mpa_opt_idx = DUAL_WAVEFORM_OPTICAL_ENV_COLUMNS.index("P_MPa")
+        self.assertFalse(
+            np.allclose(dataset.optical[:, p_mpa_opt_idx], noisy.optical[:, p_mpa_opt_idx]),
+            "Embedded P_MPa column in optical matrix must change after environment noise injection",
+        )
+
+    def test_oof_degenerate_path_raises_value_error(self) -> None:
+        """T-P1-2: OOF with < 2 groups must raise instead of silently leaking."""
+
+        config = ModelConfig(stacking_folds=5, n_perturbations=1, random_state=7)
+        model = TraditionalFusionModel(config, component_names=("H2", "CH4", "CO2", "N2"))
+        inputs = {
+            "acoustic": np.arange(15, dtype=float).reshape(5, 3),
+            "optical": np.arange(15, 30, dtype=float).reshape(5, 3),
+            "thermal": np.arange(30, 45, dtype=float).reshape(5, 3),
+        }
+        target = np.linspace(0.0, 1.0, 20).reshape(5, 4)
+        groups = np.array(["M1", "M1", "M1", "M1", "M1"], dtype=object)
+
+        with self.assertRaises(ValueError):
+            model._oof_meta_inputs(inputs, target, groups)
+
+    def test_optical_fault_multiplier_stays_positive(self) -> None:
+        """T-P1-3: optical multiplier must be clipped to positive range."""
+
+        dataset = _dataset()
+        for severity in ("mild", "medium", "severe"):
+            faulted = inject_faults(dataset, "optical_fail", severity=severity, seed=99)
+            original_sign = np.sign(dataset.optical)
+            faulted_sign = np.sign(faulted.optical)
+            non_zero = original_sign != 0
+            self.assertTrue(
+                np.all(original_sign[non_zero] == faulted_sign[non_zero]),
+                f"Optical values must not flip sign at severity={severity}",
+            )
 
 
 if __name__ == "__main__":

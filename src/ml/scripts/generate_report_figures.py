@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--output-dir", default="outputs/report_figures_v3sync")
     parser.add_argument("--robustness-dir", default="outputs/environment_compensation_robustness_four_main_svr_ridge")
-    parser.add_argument("--robustness-meta-key", default="dynamic_ridge")
+    parser.add_argument("--robustness-meta-key", default="fused")
     parser.add_argument("--figure-dpi", type=positive_int, default=300)
     return parser
 

@@ -76,7 +76,7 @@ def _plot_main_heatmap(main_runs: pd.DataFrame) -> plt.Figure:
     ax.set_yticks(np.arange(len(PROFILE_ORDER)))
     ax.set_yticklabels([PROFILE_LABELS[p] for p in PROFILE_ORDER])
     ax.set_title("四组分主实验：全部模型组合宏 RMSE 热图")
-    ax.set_xlabel("分支 / 元学习器")
+    ax.set_xlabel("基学习器 / 融合器组合")
     ax.set_ylabel("数据 profile")
     threshold = float(np.nanmin(values) + (np.nanmax(values) - np.nanmin(values)) * 0.55)
     for i, profile in enumerate(PROFILE_ORDER):
@@ -174,7 +174,7 @@ def _plot_robustness_curves(noise: pd.DataFrame, pressure: pd.DataFrame, meta_ke
 
 def _plot_decision_dashboard(top_candidates: pd.DataFrame) -> plt.Figure:
     subset = top_candidates.sort_values("macro_RMSE_pp").head(10)
-    labels = [_candidate_label(row.profile, row.combo) for row in subset.itertuples()]
+    labels = [_candidate_label(row.profile, row.combo, row.model_name) for row in subset.itertuples()]
     colors = ["#d84b4b" if row.recommendation == "recommended" else "#9aa5b1" if row.recommendation == "baseline" else "#4c78a8" for row in subset.itertuples()]
     fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.0), gridspec_kw={"width_ratios": [1.45, 1.0]})
 
@@ -205,14 +205,14 @@ def _plot_decision_dashboard(top_candidates: pd.DataFrame) -> plt.Figure:
     axes[1].grid(alpha=0.22)
     for row in subset.itertuples():
         if row.recommendation == "recommended":
-            axes[1].annotate(COMBO_LABELS.get(row.combo, row.combo), (row.macro_R2, row.macro_MRE_pct), xytext=(8, -10), textcoords="offset points", fontsize=9)
+            axes[1].annotate(f"{COMBO_LABELS.get(row.combo, row.combo)} / {row.model_name}", (row.macro_R2, row.macro_MRE_pct), xytext=(8, -10), textcoords="offset points", fontsize=9)
     fig.suptitle("最终推荐组合决策总览", y=0.98)
     return fig
 
 
 def _plot_metric_small_multiples(top_candidates: pd.DataFrame) -> plt.Figure:
     subset = top_candidates.sort_values("macro_RMSE_pp").head(6).copy()
-    subset["label"] = [_candidate_label(row.profile, row.combo) for row in subset.itertuples()]
+    subset["label"] = [_candidate_label(row.profile, row.combo, row.model_name) for row in subset.itertuples()]
     metrics = [
         ("macro_RMSE_pp", "macro RMSE_pp", True),
         ("macro_R2", "macro R2", False),
@@ -273,7 +273,7 @@ def _plot_candidate_component_compare(component_candidates: pd.DataFrame) -> plt
 
 def _plot_robustness_scoreboard(robustness_summary: pd.DataFrame) -> plt.Figure:
     subset = robustness_summary.copy()
-    subset["label"] = [_candidate_label(row.profile, row.combo) for row in subset.itertuples()]
+    subset["label"] = [_candidate_label(row.profile, row.combo, row.model_name) for row in subset.itertuples()]
     subset = subset.sort_values(["detection_macro_RMSE_pp", "pressure_macro_RMSE_pp_worst"], ascending=[True, True]).head(8)
     y = np.arange(len(subset))
     fig, ax = plt.subplots(figsize=(12.2, 5.2))
@@ -289,4 +289,3 @@ def _plot_robustness_scoreboard(robustness_summary: pd.DataFrame) -> plt.Figure:
     ax.grid(axis="x", alpha=0.22)
     ax.legend(loc="best")
     return fig
-

@@ -16,11 +16,11 @@
 - macro_MRE：仅在 x_H2 / x_CH4 上取均值（低含量组分 MRE 会爆炸，单独算）
 - per_component R²：x_H2, x_CH4, x_CO2, x_N2 四个
 - sum_error：预测和减 100% 的绝对误差均值与最大值
-- seed_std：跨 seed 标准差，反映稳定性
+- seed_std：跨 seed 标准差，仅在 R1 重复性检测中报告
 
-### G2：融合策略对比
+### G2：模态与动态融合对比
 
-**问题**：双通道 waveform 与 slow channel 怎么融合最合适？
+**问题**：三种模态四输出基学习器及其动态融合结果，哪个最适合当前双通道数据？
 
 **主指标**：macro_RMSE + 参数量 + 训练时长。
 
@@ -34,27 +34,33 @@
 - degradation_ratio = perturbed_RMSE / clean_RMSE（Track B 环境扰动）
 - sample_efficiency = RMSE vs fine-tune 样本数（Track C 跨域微调，**可选**）
 
+### R1：重复性检测
+
+**问题**：主线 seed=42 的结论是否对随机初始化、随机划分和随机扰动敏感？
+
+**口径**：独立运行 `experiments/exp06_reproducibility.ps1`。seed42 先检查主线与 R1 输出是否已经存在，已有则复用；缺失才补跑。R1 默认补跑 seed [52, 62]，输出到 `outputs/exp06_reproducibility/`，不阻塞 G1-G3 主线。
+
+**报告**：每个模型 / profile / combo 的 mean、std、min、max，核心关注 `seed_std` 与主线 seed42 结果的偏差。
+
 ## 2. 实验矩阵
 
 ### G1 实验矩阵
 
 | 实验组 | 模型 | 输入 | seed | 输出目录 |
 | -------- | -------------------------- | -------------------------------------------- | -------- | ---------------- |
-| 传统 ML core | PLS + Ridge | 双通道派生特征（TOF / tau / 峰值 / 反射峰统计 + slow） | 42/52/62 | exp01/core |
-| 传统 ML core | PLS + XGBoost | 同上 | 42/52/62 | exp01/core |
-| 传统 ML core | XGBoost + Ridge | 同上 | 42/52/62 | exp01/core |
-| 传统 ML core | XGBoost + XGBoost | 同上 | 42/52/62 | exp01/core |
-| 传统 ML diagnostic | SVR (RBF) + Ridge | 同上 | 42 或抽样 | exp01/diagnostic |
-| DL 端到端 | MultimodalFusionV3 | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42/52/62 | exp02/v3_wf/ |
-| DL 慢通道基线 | LSTM (slow only) | slow[8] | 42/52/62 | exp02/lstm_slow/ |
-| DL 慢通道基线 | TCN (slow only) | slow[8] | 42/52/62 | exp02/tcn_slow/ |
-| DL 双波形基线 | WaveformOnlyDual (no slow) | ultrasonic[1000] + fiber_mic[2000] | 42/52/62 | exp02/wf_only/ |
+| 传统 ML core | SVR + Ridge | 双通道派生特征（TOF / tau / 峰值 / 反射峰统计 + slow） | 42 | exp01/core |
+| 传统 ML core | PLS + Ridge | 同上 | 42 | exp01/core |
+| 传统 ML core | XGBoost + Ridge | 同上 | 42 | exp01/core |
+| DL 端到端 | MultimodalFusionV3 | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42 | exp02/v3_wf/ |
+| DL 慢通道基线 | LSTM (slow only) | slow[8] | 42 | exp02/lstm_slow/ |
+| DL 慢通道基线 | TCN (slow only) | slow[8] | 42 | exp02/tcn_slow/ |
+| DL 双波形基线 | WaveformOnlyDual (no slow) | ultrasonic[1000] + fiber_mic[2000] | 42 | exp02/wf_only/ |
 
 补充说明：
 
-- `SVR (RBF)` 不再作为默认正式全量主网格，因为在当前 `31696` 级训练样本上训练成本过高。
-- 正式主线先出 `paper_core` 结果，再补 `svr_diagnostic` 作为对照。
-- 传统 ML grid summary 现已带 `fit_seconds`、`evaluate_seconds`、`write_seconds`、`total_seconds`、`prediction_cache_reused`。
+- 新传统架构改为“三模态四输出基学习器 + 动态权重 + 二次融合器”。
+- 每个 combo 会同时产出 `acoustic`、`optical`、`thermal`、`fused` 四类结果，`fused` 为正式主结果。
+- 传统 ML grid summary 现已带 `fit_seconds`、`evaluate_seconds`、`write_seconds`、`total_seconds`、`prediction_cache_reused`，并新增 `model_name` 维度。
 - 传统训练与深度训练入口现在都支持内置 CLI 阶段进度显示；交互终端默认开启，可用 `--no-ui` 关闭。
 
 **特征定义**（传统 ML 输入）：
@@ -67,18 +73,17 @@
 - 结合 slow 通道中的 NDIR、TCS 与温压湿变量，补充相对基线变化量和环境派生量，形成可直接供浅模型训练的表格特征。
 - 最终按模态导出 `train_acoustic.csv`、`train_optical.csv`、`train_thermal.csv`，并同步写出完整 `feature_table.csv` 与 `feature_manifest.json`；需要环境补偿对照时，再导出 `*_env.csv` 与 `feature_table_env.csv`。
 
-### G2 融合策略矩阵
+### G2 模态与动态融合矩阵
 
 | 策略             | 实现                                                                             | 配置文件                               |
 | -------------- | ------------------------------------------------------------------------------ | ---------------------------------- |
 | Early fusion   | ultrasonic encoder + fiber_mic encoder → concat slow[8] → temporal head → head | configs/deep/fusion_early.yaml     |
 | Middle fusion  | 三支路各自编码后在 fusion layer 汇合                                                      | configs/deep/fusion_middle.yaml    |
 | Late fusion    | 波形分支与 slow 分支独立预测 → 学习权重加权                                                     | configs/deep/fusion_late.yaml      |
-| ML 单模型对照       | XGBoost 单模型                                                                    | configs/traditional/xgb.yaml       |
-| ML stacking 对照 | PLS / XGBoost core 组合                                                        | scripts + runtime combo-list       |
-| ML 诊断对照 | SVR + Ridge dynamic fusion                                                     | scripts + runtime combo-list       |
+| ML 模态对照 | `acoustic / optical / thermal` 四输出基学习器                                      | scripts + runtime combo-list       |
+| ML 融合对照 | `fused` 动态融合输出                                                               | scripts + runtime combo-list       |
 
-每种策略 3 seed，输出到 `exp03/`。
+每种策略主线固定 seed=42，输出到 `exp03/`。
 
 ### G3 复杂工况矩阵
 
@@ -92,7 +97,7 @@
 
 初始网格 3×3×2 = 18 域，合并样本量 < 500 的稀疏域，最终约 9 个域。具体合并规则在 `src/pipeline/domain_split.py` 实现并记录到 `outputs/exp04_domain/domain_definition.json`。
 
-**评估方式**：轮流 hold-out 1 域，N-1 域训练。每域每模型 3 seed。
+**评估方式**：轮流 hold-out 1 域，N-1 域训练。主线固定 seed=42。
 
 **报告**：
 
@@ -127,27 +132,27 @@
 | 同数据源     | `configs/paths.yaml` 锁定 `data/waveform_v3/` 的 `ultrasonic + fiber_mic + slow + y` |
 | 同划分      | `data/waveform_v3/splits/*.csv` 固定，按 `mixture_id` 分组，V3.1 生成 seed 为 `20260514`    |
 | 同标准化     | slow scaler 仅在 train 上拟合；两路 waveform 不单独存 scaler JSON，只做反量化与 train 统计归一化          |
-| 同 seed 集 | [42, 52, 62]，所有模型共用                                                               |
+| 同随机基准    | 主线固定 seed=42；R1 复用已有 seed42，并补跑 [52, 62]                                      |
 | 同指标      | `src/pipeline/evaluate.py` 统一计算                                                   |
 
 ## 4. 验收标准
 
 ### G1 验收
 
-- [ ] 所有 ML 与 DL 模型用同一 split、同一 slow scaler、同一 waveform 反量化 / 归一化规则、同一 seed 集运行
-- [ ] `outputs/summary/results.tsv` 含每个模型每 seed 的全部指标
-- [ ] `outputs/summary/results_multiseed.tsv` 含 mean / std / min / max
+- [ ] 所有 ML 与 DL 模型用同一 split、同一 slow scaler、同一 waveform 反量化 / 归一化规则、同一主线 seed=42 运行
+- [ ] `outputs/summary/results.tsv` 含每个主线模型的全部指标
+- [ ] R1 完成后，`outputs/summary/results_multiseed.tsv` 含 mean / std / min / max
 - [ ] Paired bootstrap CI + Wilcoxon 检验：`outputs/summary/stat_tests.tsv`
 
 ### G2 验收
 
-- [ ] 三种 DL 融合策略 + 2 个 ML 对照，每个 3 seed
+- [ ] 三种 DL 融合策略 + 传统 ML 的 `acoustic / optical / thermal / fused` 对照，主线固定 seed=42
 - [ ] `outputs/exp03_fusion/` 结果入 `outputs/summary/results.tsv`，含 macro_RMSE + 参数量 + 训练时长
 - [ ] 出图：`outputs/summary/fig_fusion_strategy.png`
 
 ### G3 验收
 
-- [ ] Track A：至少 9 域 hold-out，每域每模型 3 seed
+- [ ] Track A：至少 9 域 hold-out，每域每模型固定 seed=42
 - [ ] Track A 结果含 domain_gap，入 `outputs/summary/results.tsv`
 - [ ] Track B：σ_train × σ_test 完整矩阵
 - [ ] Track B 输出 degradation_ratio 曲线表
@@ -279,29 +284,33 @@ src/pipeline/
 
 ## 8. 时间预算
 
+训练速度优化路线、资源参数 smoke benchmark 与正式配置准入标准见 `docs/训练速度优化计划.md`；本设计文档只保留实验口径与验收矩阵。
+
 | Phase  | 任务                                           | 估时          |
 | ------ | -------------------------------------------- | ----------- |
 | P0 第二步 | 双通道仿真代码改造 + 数据生成 + 写 shim/feature_extraction | 2-3 天       |
-| P1     | 传统 ML 基线（core 4 组合 × 3 seed + diagnostic）    | 1-2 天 + CPU |
-| P2     | DL 端到端基线（4 配置 × 3 seed）                      | 1-2 天 + GPU |
-| P3     | 融合策略对比（3 策略 × 3 seed）                        | 1-2 天 + GPU |
+| P1     | 传统 ML 基线（core 4 组合 × seed42 + diagnostic）    | 1 天 + CPU |
+| P2     | DL 端到端基线（4 配置 × seed42）                      | 1 天 + GPU |
+| P3     | 模态与动态融合对比（3 个传统 combo × 4 类输出）              | 1 天 + CPU/GPU |
 | P4     | Track A 留一域（9 域 × 多模型）                       | 2-3 天 + GPU |
 | P5     | Track B 环境扰动                                 | 2-3 天 + GPU |
-| P6     | Track C 跨域微调（可选）                             | 1-2 天 + GPU |
-| P7     | 结果汇总 + 论文图                                   | 1 天         |
+| P6     | R1 多 seed 重复性检测（复用 seed42，补跑 52/62）      | 分批 CPU/GPU |
+| P7     | Track C 跨域微调（可选）                             | 1-2 天 + GPU |
+| P8     | 结果汇总 + 论文图                                   | 1 天         |
 
 合计 9-14 天 + 多批 GPU 时长（Track C 可选不计）。
 
-## 9. 论文图清单（P7 产出）
+## 9. 论文图清单（P8 产出）
 
 | 图号  | 主题                         | 来源数据                           |
 | --- | -------------------------- | ------------------------------ |
-| F1  | ML vs DL 主对比（条形图 + 误差棒）    | summary/results.tsv（多 seed 聚合） |
+| F1  | ML vs DL 主对比（条形图）          | summary/results.tsv            |
 | F2  | per-component R² 雷达图       | summary/results.tsv            |
-| F3  | 融合策略对比                     | summary/results.tsv（exp03 子集）  |
+| F3  | 模态与动态融合对比                 | summary/results.tsv（exp03 子集）  |
 | F4  | 留一域 domain_gap 热图          | summary/results.tsv（exp04 子集）  |
 | F5  | 环境扰动退化率曲线                  | summary/results.tsv（exp05 子集）  |
-| F6  | 跨域微调 sample efficiency（可选） | summary/results.tsv（exp06 子集）  |
+| F6  | 多 seed 重复性误差棒              | summary/results_multiseed.tsv（exp06 子集） |
+| F7  | 跨域微调 sample efficiency（可选） | summary/results.tsv（exp07 子集）  |
 
 
 

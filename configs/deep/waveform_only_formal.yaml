@@ -5,10 +5,10 @@ run:
 
 data:
   dataset_type: waveform_v3
-  npz_path: data/waveform_v3
-  index_path: data/waveform_v3/sequence_index.csv
-  split_dir: data/waveform_v3/splits
-  scaler_path: data/waveform_v3/scalers/scaler_slow_sequence.json
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
   split_strategy: existing_or_group_mixture
   time_window: all
 

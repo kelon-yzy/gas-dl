@@ -36,6 +36,8 @@ def _abs_quantile_threshold(values: pd.Series, quantile: float) -> float:
 def _acoustic_delay_residuals(dataset: PatentDataset) -> np.ndarray:
     """按 mixture_id 拟合 TOF 与声程关系，提取声学残差。"""
 
+    if not dataset.acoustic_columns or "L_m" not in dataset.acoustic_columns:
+        return np.full(dataset.n_samples, np.nan, dtype=float)
     tof_idx = _required_acoustic_index(dataset, "TOF")
     length_idx = _required_acoustic_index(dataset, "L_m")
     metadata = dataset.metadata
@@ -151,7 +153,12 @@ def inject_faults(dataset: PatentDataset, case: str, severity: str = "medium", s
     if case in {"optical_fail", "mixed_fail"}:
         optical_scale = _column_scale(optical)
         optical += rng.normal(0.0, optical_scale * scale, size=optical.shape)
-        optical *= rng.normal(1.0 - scale * 0.25, scale * 0.08, size=optical.shape)
+        multiplier = np.clip(
+            rng.normal(1.0 - scale * 0.25, scale * 0.08, size=optical.shape),
+            0.05,
+            2.0,
+        )
+        optical *= multiplier
 
     # 热导故障表现为整体偏移和漂移增大。
     if case in {"thermal_drift", "mixed_fail"}:

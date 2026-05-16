@@ -12,9 +12,9 @@ from patent_model.feature_profiles import FEATURE_PROFILES
 from patent_model.logging_utils import get_logger
 from scripts._cli_utils import positive_int
 from scripts.environment_compensation_common import (
+    META_KEY,
     PROFILES,
     add_model_args,
-    build_meta_key,
     extend_model_cli_args,
     profile_data_dir,
     require_known_profile_mode,
@@ -69,19 +69,6 @@ def _train_profile(args: argparse.Namespace, profile: str, output_dir: Path) -> 
         argv.extend(["--train-limit", str(args.train_limit)])
     if args.test_limit is not None:
         argv.extend(["--test-limit", str(args.test_limit)])
-    if profile == "derived_env_mc_aug":
-        argv.extend(
-            [
-                "--mc-env-samples",
-                str(args.mc_env_samples),
-                "--mc-env-sigma-t",
-                str(args.mc_env_sigma_t),
-                "--mc-env-sigma-p",
-                str(args.mc_env_sigma_p),
-                "--mc-env-sigma-h",
-                str(args.mc_env_sigma_h),
-            ]
-        )
     return train_main(argv)
 
 
@@ -103,6 +90,14 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
     comparison = pd.concat(metric_frames, ignore_index=True)
     comparison.to_csv(output_dir / "environment_compensation_summary.csv", index=False)
+    best_profile_by_model = (
+        comparison.groupby(["model", "profile"], as_index=False)["RMSE_pp"].mean()
+        .sort_values(["model", "RMSE_pp", "profile"])
+        .groupby("model", as_index=False)
+        .first()
+        .rename(columns={"model": "run", "RMSE_pp": "macro_RMSE_pp"})
+    )
+    best_profile_by_model.to_csv(output_dir / "best_profile_by_model.csv", index=False)
 
     summary = {
         "profiles": list(PROFILES),
@@ -111,8 +106,9 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
         "branch_model_type": args.branch_model_type,
         "meta_model_type": args.meta_model_type,
         "component_mode": args.component_mode,
-        "meta_key": build_meta_key(args.meta_model_type),
-        "main_metric": f"dynamic_{args.meta_model_type} macro RMSE_pp",
+        "meta_key": META_KEY,
+        "main_metric": "fused macro RMSE_pp",
+        "best_profile_by_model_csv": "best_profile_by_model.csv",
         "runs": run_summaries,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")

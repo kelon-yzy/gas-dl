@@ -363,7 +363,133 @@ def save_predictions(path: Path, meta: pd.DataFrame, y_true, y_pred, split: str,
     out.to_csv(path, index=False)
 
 
-def train_config(config: dict, epochs_override: int | None = None) -> dict:
+# ── checkpoint helpers ──────────────────────────────────────────
+
+def _capture_rng_state() -> dict:
+    """捕获当前所有随机数生成器状态"""
+    cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    return {
+        "torch": torch.get_rng_state(),
+        "cuda": cuda_state,
+        "numpy": np.random.get_state(),
+    }
+
+
+def _restore_rng_state(state: dict) -> None:
+    """恢复随机数生成器状态"""
+    t_state = state["torch"]
+    if t_state.device.type != "cpu":
+        t_state = t_state.cpu()
+    torch.set_rng_state(t_state)
+    if state.get("cuda") and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    np.random.set_state(state["numpy"])
+
+
+def _checkpoint_payload(
+    model,
+    optimizer,
+    scaler,
+    stopper,
+    epoch: int,
+    total_epochs: int,
+    log_rows: list,
+    best_path: Path,
+    config_to_write: dict,
+    status: str = "running",
+) -> dict:
+    """组装 checkpoint dict，模型参数移至 CPU 以支持跨设备恢复"""
+    model_state = {}
+    for k, v in model.state_dict().items():
+        model_state[k] = v.cpu()
+    optim_state = {}
+    for k, v in optimizer.state_dict().items():
+        if isinstance(v, torch.Tensor):
+            optim_state[k] = v.cpu()
+        elif isinstance(v, dict):
+            optim_state[k] = {kk: vv.cpu() if isinstance(vv, torch.Tensor) else vv for kk, vv in v.items()}
+        else:
+            optim_state[k] = v
+    return {
+        "format_version": 1,
+        "status": status,
+        "epoch": epoch,
+        "total_epochs": total_epochs,
+        "config": config_to_write,
+        "model_name": config_to_write.get("model", {}).get("name"),
+        "model_state_dict": model_state,
+        "optimizer_state_dict": optim_state,
+        "amp_scaler_state_dict": scaler.state_dict(),
+        "early_stopping": {
+            "best": stopper.best,
+            "bad_epochs": stopper.bad_epochs,
+            "patience": stopper.patience,
+            "mode": stopper.mode,
+        },
+        "log_rows": log_rows,
+        "best_metric": stopper.best,
+        "best_model_path": str(best_path),
+        "rng_state": _capture_rng_state(),
+    }
+
+
+def _save_checkpoint(path: Path, payload: dict) -> None:
+    """原子保存：先写临时文件再 rename，避免写入中断产生半文件"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def _load_checkpoint(path: Path, device: torch.device) -> dict:
+    """加载 checkpoint 并做基本校验"""
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if not isinstance(ckpt, dict):
+        raise ValueError(f"Checkpoint is not a dict: {type(ckpt)}")
+    if ckpt.get("format_version") != 1:
+        raise ValueError(f"Unsupported checkpoint format_version: {ckpt.get('format_version')}")
+    return ckpt
+
+
+def _restore_early_stopping(stopper: "EarlyStopping", state: dict) -> None:
+    """恢复 EarlyStopping 内部状态"""
+    stopper.best = state.get("best")
+    stopper.bad_epochs = state.get("bad_epochs", 0)
+    if "patience" in state:
+        stopper.patience = state["patience"]
+    if "mode" in state:
+        stopper.mode = state["mode"]
+
+
+def _validate_checkpoint_compat(ckpt: dict, config: dict) -> None:
+    """校验 checkpoint 与当前配置的兼容性：模型名 + 必要键"""
+    ckpt_model = ckpt.get("model_name")
+    cur_model = config.get("model", {}).get("name")
+    if ckpt_model and cur_model and ckpt_model != cur_model:
+        raise ValueError(
+            f"Model mismatch: checkpoint uses '{ckpt_model}', config uses '{cur_model}'"
+        )
+    required = [
+        "format_version", "epoch", "total_epochs", "model_state_dict",
+        "optimizer_state_dict", "amp_scaler_state_dict", "early_stopping",
+        "log_rows", "rng_state",
+    ]
+    missing = [k for k in required if k not in ckpt]
+    if missing:
+        raise ValueError(f"Checkpoint missing required keys: {missing}")
+
+
+# ── main training ──────────────────────────────────────────────
+
+def train_config(
+    config: dict,
+    epochs_override: int | None = None,
+    resume_path: str | Path | None = None,
+    checkpoint_every: int = 0,
+    restore_rng: bool = True,
+    stop_after_epoch: int | None = None,
+) -> dict:
     if epochs_override is not None:
         config["training"]["epochs"] = epochs_override
 
@@ -398,7 +524,35 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     stopper = EarlyStopping(patience=int(config["training"].get("early_stopping_patience", 25)), mode="min")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     total_epochs = int(config["training"].get("epochs", 200))
+
+    # ── 恢复训练 ──
+    start_epoch = 1
+    log_rows = []
+    best_path = output_dir / "best_model.pt"
+    last_ckpt_path = output_dir / "last_checkpoint.pt"
+    best_ckpt_path = output_dir / "best_checkpoint.pt"
+    paused_ckpt_path = output_dir / "paused_checkpoint.pt"
+    resumed_from = None
+
     progress = config.get("_cli_progress")
+    if resume_path:
+        resume_path = Path(resume_path)
+        ckpt = _load_checkpoint(resume_path, device)
+        _validate_checkpoint_compat(ckpt, config)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scaler.load_state_dict(ckpt["amp_scaler_state_dict"])
+        _restore_early_stopping(stopper, ckpt.get("early_stopping", {}))
+        if restore_rng:
+            _restore_rng_state(ckpt["rng_state"])
+        log_rows = ckpt.get("log_rows", [])
+        start_epoch = ckpt["epoch"] + 1
+        resumed_from = str(resume_path)
+        if start_epoch > total_epochs:
+            if progress is not None:
+                progress.log_message(f"checkpoint epoch {ckpt['epoch']} >= target {total_epochs}, 跳过训练直接评估")
+            start_epoch = total_epochs + 1
+
     if progress is not None:
         progress.start_run(mode="deep", title=config["run"]["name"], seed=int(config["run"].get("seed", 42)), stage="setup")
         progress.update_metric(
@@ -410,55 +564,126 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
             n_test=len(datasets["test"]),
         )
 
-    log_rows = []
-    best_path = output_dir / "best_model.pt"
-    for epoch in range(1, total_epochs + 1):
-        epoch_started = perf_counter()
-        train_loss = _train_one_epoch(
-            model,
-            loaders["train"],
-            loss_fn,
-            optimizer,
-            device,
-            datasets["train"],
-            float(config["training"].get("environment_augmentation_sigma", 0.0)),
-            amp_enabled=amp_enabled,
-            scaler=scaler,
-        )
+    config_to_write = {k: v for k, v in config.items() if not k.startswith("_")}
+    training_status = "completed"
+    paused = False
 
-        val_loss, val_bundle = evaluate_with_predictions(model, loaders["val"], loss_fn, device)
-        val_summary, _ = regression_metrics(val_bundle.y_true, val_bundle.y_pred, label_names=label_names)
-        monitor_value = val_summary["macro_RMSE"]
-        improved = stopper.step(monitor_value)
-        if improved:
-            torch.save(model.state_dict(), best_path)
-        row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_macro_RMSE": monitor_value,
-            "val_macro_MAE": val_summary["macro_MAE"],
-            "improved": improved,
-        }
-        log_rows.append(row)
-        if progress is not None:
-            progress.update_stage(stage="epoch", current_task=f"epoch={epoch}/{total_epochs}", completed=epoch, total=total_epochs)
-            progress.update_metric(
-                epoch=epoch,
-                train_loss=train_loss,
-                val_loss=val_loss,
-                val_macro_RMSE=monitor_value,
-                improved=improved,
-                best=stopper.best,
-                bad_epochs=stopper.bad_epochs,
-                patience=stopper.patience,
-                epoch_seconds=perf_counter() - epoch_started,
+    try:
+        for epoch in range(start_epoch, total_epochs + 1):
+            epoch_started = perf_counter()
+            train_loss = _train_one_epoch(
+                model,
+                loaders["train"],
+                loss_fn,
+                optimizer,
+                device,
+                datasets["train"],
+                float(config["training"].get("environment_augmentation_sigma", 0.0)),
+                amp_enabled=amp_enabled,
+                scaler=scaler,
             )
-        if stopper.should_stop:
-            if progress is not None:
-                progress.log_message(f"early stop at epoch {epoch}")
-            break
 
+            val_loss, val_bundle = evaluate_with_predictions(model, loaders["val"], loss_fn, device)
+            val_summary, _ = regression_metrics(val_bundle.y_true, val_bundle.y_pred, label_names=label_names)
+            monitor_value = val_summary["macro_RMSE"]
+            improved = stopper.step(monitor_value)
+
+            # 先构造并 append row，确保后续 checkpoint 包含当前 epoch 日志
+            row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_macro_RMSE": monitor_value,
+                "val_macro_MAE": val_summary["macro_MAE"],
+                "improved": improved,
+            }
+            log_rows.append(row)
+
+            if improved:
+                torch.save(model.state_dict(), best_path)
+                _save_checkpoint(best_ckpt_path, _checkpoint_payload(
+                    model, optimizer, scaler, stopper, epoch, total_epochs,
+                    log_rows, best_path, config_to_write, status="running",
+                ))
+
+            if progress is not None:
+                progress.update_stage(stage="epoch", current_task=f"epoch={epoch}/{total_epochs}", completed=epoch, total=total_epochs)
+                progress.update_metric(
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    val_loss=val_loss,
+                    val_macro_RMSE=monitor_value,
+                    improved=improved,
+                    best=stopper.best,
+                    bad_epochs=stopper.bad_epochs,
+                    patience=stopper.patience,
+                    epoch_seconds=perf_counter() - epoch_started,
+                )
+
+            # 每个 epoch 后保存 last_checkpoint
+            _save_checkpoint(last_ckpt_path, _checkpoint_payload(
+                model, optimizer, scaler, stopper, epoch, total_epochs,
+                log_rows, best_path, config_to_write, status="running",
+            ))
+
+            # 周期快照 epoch_XXXX.pt
+            if checkpoint_every > 0 and epoch % checkpoint_every == 0:
+                _save_checkpoint(output_dir / f"epoch_{epoch:04d}.pt", _checkpoint_payload(
+                    model, optimizer, scaler, stopper, epoch, total_epochs,
+                    log_rows, best_path, config_to_write, status="running",
+                ))
+
+            # 测试专用：训练到指定 epoch 后主动暂停
+            if stop_after_epoch is not None and epoch >= stop_after_epoch:
+                training_status = "paused"
+                paused = True
+                if progress is not None:
+                    progress.log_message(f"stop_after_epoch={stop_after_epoch}, 暂停于 epoch {epoch}")
+                break
+
+            if stopper.should_stop:
+                if progress is not None:
+                    progress.log_message(f"early stop at epoch {epoch}")
+                break
+
+    except KeyboardInterrupt:
+        training_status = "paused"
+        paused = True
+        if progress is not None:
+            progress.log_message("用户中断 (Ctrl+C), 从 last_checkpoint 回退干净权重")
+        # 回退到最近完整 epoch 的干净权重，避免保存半轮训练状态
+        if last_ckpt_path.exists():
+            ckpt_clean = _load_checkpoint(last_ckpt_path, device)
+            model.load_state_dict(ckpt_clean["model_state_dict"])
+            optimizer.load_state_dict(ckpt_clean["optimizer_state_dict"])
+            scaler.load_state_dict(ckpt_clean["amp_scaler_state_dict"])
+
+    # ── 暂停退出：写部分输出，不跑测试集 ──
+    if paused:
+        last_epoch = log_rows[-1]["epoch"] if log_rows else (start_epoch - 1)
+        _save_checkpoint(paused_ckpt_path, _checkpoint_payload(
+            model, optimizer, scaler, stopper, last_epoch, total_epochs,
+            log_rows, best_path, config_to_write, status="paused",
+        ))
+        summary = {
+            "run_name": config["run"]["name"],
+            "model": config["model"]["name"],
+            "label_names": label_names,
+            "seed": int(config["run"].get("seed", 42)),
+            "training_status": "paused",
+            "resumed_from": resumed_from,
+            "last_checkpoint": str(last_ckpt_path),
+            "best_checkpoint": str(best_ckpt_path),
+            "epochs_trained": int(log_rows[-1]["epoch"]) if log_rows else 0,
+        }
+        if progress is not None:
+            progress.finish_run(status="paused", epochs_trained=summary["epochs_trained"])
+        (output_dir / "config.json").write_text(json.dumps(config_to_write, indent=2, ensure_ascii=False), encoding="utf-8")
+        (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        pd.DataFrame(log_rows).to_csv(output_dir / "train_log.csv", index=False)
+        return summary
+
+    # ── 正常完成 ──
     if best_path.exists():
         model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
 
@@ -475,10 +700,14 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
             "batch_size": batch_size,
             "num_workers": num_workers,
             "eval_num_workers": eval_num_workers,
-            "epochs_trained": int(log_rows[-1]["epoch"]),
+            "epochs_trained": int(log_rows[-1]["epoch"]) if log_rows else 0,
             "n_train": int(len(datasets["train"])),
             "n_val": int(len(datasets["val"])),
             "n_test": int(len(datasets["test"])),
+            "training_status": "completed",
+            "resumed_from": resumed_from,
+            "last_checkpoint": str(last_ckpt_path),
+            "best_checkpoint": str(best_ckpt_path),
         }
     )
     if "use_waveform" in config.get("model", {}):
@@ -487,7 +716,13 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     if progress is not None:
         progress.finish_run(status="done", macro_RMSE=summary["macro_RMSE"], epochs_trained=summary["epochs_trained"])
 
-    config_to_write = {k: v for k, v in config.items() if not k.startswith("_")}
+    # 正常完成后保存 completed 状态的 last_checkpoint
+    final_epoch = int(log_rows[-1]["epoch"]) if log_rows else 0
+    _save_checkpoint(last_ckpt_path, _checkpoint_payload(
+        model, optimizer, scaler, stopper, final_epoch, total_epochs,
+        log_rows, best_path, config_to_write, status="completed",
+    ))
+
     (output_dir / "config.json").write_text(json.dumps(config_to_write, indent=2, ensure_ascii=False), encoding="utf-8")
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     component_metrics.to_csv(output_dir / "component_metrics.csv", index=False)
@@ -503,12 +738,27 @@ def train_config(config: dict, epochs_override: int | None = None) -> dict:
     return summary
 
 
-def train_one(config_path: str | Path, epochs_override: int | None = None, progress=None) -> dict:
+def train_one(
+    config_path: str | Path,
+    epochs_override: int | None = None,
+    progress=None,
+    resume_path: str | Path | None = None,
+    checkpoint_every: int = 0,
+    restore_rng: bool = True,
+    stop_after_epoch: int | None = None,
+) -> dict:
     config_path = Path(config_path).resolve()
     config = load_config(config_path)
     if progress is not None:
         config["_cli_progress"] = progress
-    return train_config(config, epochs_override=epochs_override)
+    return train_config(
+        config,
+        epochs_override=epochs_override,
+        resume_path=resume_path,
+        checkpoint_every=checkpoint_every,
+        restore_rng=restore_rng,
+        stop_after_epoch=stop_after_epoch,
+    )
 
 
 def main():

@@ -18,14 +18,14 @@ def _split_combo_name(combo: str) -> tuple[str, str]:
     return branch, meta
 
 
-def _candidate_label(profile: str, combo: str) -> str:
+def _candidate_label(profile: str, combo: str, model_name: str) -> str:
     profile_label = PROFILE_LABELS.get(profile, profile)
     combo_label = COMBO_LABELS.get(combo, combo)
-    return f"{profile_label}\n{combo_label}"
+    return f"{profile_label}\n{combo_label}\n{model_name}"
 
 
 def _highlight_mask(frame: pd.DataFrame) -> pd.Series:
-    return (frame["profile"] == PREFERRED_PROFILE) & (frame["combo"] == PREFERRED_COMBO)
+    return (frame["profile"] == PREFERRED_PROFILE) & (frame["combo"] == PREFERRED_COMBO) & (frame["model_name"] == "fused")
 
 
 def _fallback_preferred_row(frame: pd.DataFrame) -> pd.Series:
@@ -41,7 +41,7 @@ def _build_decision_summary(main_runs: pd.DataFrame, robustness_summary: pd.Data
     if not robustness_summary.empty:
         merged = frame.merge(
             robustness_summary,
-            on=["profile", "combo", "branch", "meta"],
+            on=["profile", "combo", "branch", "meta", "model_name"],
             how="left",
         )
     else:
@@ -72,10 +72,9 @@ def _build_decision_summary(main_runs: pd.DataFrame, robustness_summary: pd.Data
     if preferred.empty:
         preferred_row = _fallback_preferred_row(merged)
         top_candidates = pd.concat([top_candidates, preferred_row.to_frame().T], ignore_index=True)
-        top_candidates = top_candidates.drop_duplicates(subset=["profile", "combo"]).reset_index(drop=True)
+        top_candidates = top_candidates.drop_duplicates(subset=["profile", "combo", "model_name"]).reset_index(drop=True)
     top_candidates.loc[_highlight_mask(top_candidates), "recommendation"] = "recommended"
 
-    baseline_mask = (top_candidates["profile"] == "raw_tph") & (top_candidates["combo"] == "svr_ridge")
+    baseline_mask = (top_candidates["profile"] == "raw_tph") & (top_candidates["combo"] == "svr_ridge") & (top_candidates["model_name"] == "fused")
     top_candidates.loc[baseline_mask & (top_candidates["recommendation"] != "recommended"), "recommendation"] = "baseline"
     return merged, top_candidates
-

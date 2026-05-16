@@ -17,15 +17,15 @@ from patent_model.config import BRANCH_NAMES
 from patent_model.data_loader import grouped_train_test_split, load_patent_dataset
 from patent_model.dataset import PatentDataset
 from patent_model.environment_augmentation import augment_derived_env_training_data
-from patent_model.feature_profiles import FEATURE_PROFILES
+from patent_model.feature_profiles import FEATURE_PROFILES, has_embedded_environment
 from patent_model.fault_labels import build_observed_fault_labels
 from patent_model.logging_utils import get_logger
 from patent_model.model_config_builder import build_model_config
 from patent_model.modeling import (
-    ComponentBranchArtifacts,
-    MultiComponentPatentModel,
-    MultiComponentPrediction,
-    MultiComponentPredictionCache,
+    ModalBranchArtifacts,
+    TraditionalFusionModel,
+    TraditionalFusionPrediction,
+    TraditionalPredictionCache,
 )
 from scripts._cli_utils import limit_dataset, positive_int
 
@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mc-env-sigma-p", type=float, default=0.005, help="Pressure noise sigma in MPa for MC environment augmentation.")
     parser.add_argument("--mc-env-sigma-h", type=float, default=1.0, help="Humidity noise sigma in %RH for MC environment augmentation.")
     parser.add_argument("--metadata-filter", default="none", help="Optional metadata filter, e.g. none or detection.")
+    parser.add_argument("--stage-filter", default="stable", choices=("none", "stable"), help="Optional stage filter for stable detection samples.")
     parser.add_argument("--physical-range-filter", default="none", help="Optional physical feature range filter.")
     parser.add_argument("--label-closure-filter", default="none", help="Optional label closure filter.")
     parser.add_argument("--duplicate-filter", default="per_mixture_limit", help="Optional duplicate handling mode.")
@@ -81,15 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _predictions_frame(test: PatentDataset, prediction: MultiComponentPrediction) -> pd.DataFrame:
+def _predictions_frame(test: PatentDataset, prediction: TraditionalFusionPrediction) -> pd.DataFrame:
     """把测试集真实值和最终预测整理成表格。"""
 
     frame = pd.DataFrame({"sample_id": test.sample_ids})
     for idx, name in enumerate(test.component_names):
         frame[f"true_{name}"] = test.targets[:, idx]
-        frame[f"raw_pred_{name}"] = prediction.raw[:, idx]
+        frame[f"acoustic_pred_{name}"] = prediction.by_model["acoustic"][:, idx]
+        frame[f"optical_pred_{name}"] = prediction.by_model["optical"][:, idx]
+        frame[f"thermal_pred_{name}"] = prediction.by_model["thermal"][:, idx]
+        frame[f"fused_pred_{name}"] = prediction.raw[:, idx]
     frame["target_sum"] = test.targets.sum(axis=1)
-    frame["raw_pred_sum"] = prediction.raw.sum(axis=1)
+    frame["fused_pred_sum"] = prediction.raw.sum(axis=1)
     if "x_N2" in test.metadata.columns:
         frame["background_N2"] = test.metadata["x_N2"].to_numpy()
     for column in ("mixture_id", "stage_id", "pressure_stage", "distance_stage", "fault_case", "fault_severity"):
@@ -98,7 +102,7 @@ def _predictions_frame(test: PatentDataset, prediction: MultiComponentPrediction
     return frame
 
 
-def _weights_frame(test: PatentDataset, prediction: MultiComponentPrediction) -> pd.DataFrame:
+def _weights_frame(test: PatentDataset, prediction: TraditionalFusionPrediction) -> pd.DataFrame:
     """把每个样本、每个组分的动态权重展开成明细表。"""
 
     rows: list[dict[str, object]] = []
@@ -143,8 +147,8 @@ def _validate_args(args: argparse.Namespace) -> None:
 
     if args.mc_env_samples < 0:
         raise ValueError("--mc-env-samples must be >= 0.")
-    if args.mc_env_samples > 0 and args.feature_profile not in {"derived_env", "derived_env_four"}:
-        raise ValueError("--mc-env-samples is only supported with derived_env profiles.")
+    if args.mc_env_samples > 0 and not has_embedded_environment(args.feature_profile):
+        raise ValueError("--mc-env-samples is only supported with profiles that embed environment columns.")
 
 
 def prepare_training_data(
@@ -160,6 +164,7 @@ def prepare_training_data(
             data_dir,
             profile=feature_profile_name,
             metadata_filter=args.metadata_filter,
+            stage_filter=args.stage_filter,
             physical_range_filter=args.physical_range_filter,
             label_closure_filter=args.label_closure_filter,
             duplicate_filter=args.duplicate_filter,
@@ -196,8 +201,8 @@ def run_training(
     args: argparse.Namespace,
     dataset: PatentDataset | None = None,
     prepared_data: PreparedTrainingData | None = None,
-    branch_artifacts: list[ComponentBranchArtifacts] | None = None,
-    prediction_cache_holder: dict[str, MultiComponentPredictionCache] | None = None,
+    branch_artifacts: ModalBranchArtifacts | None = None,
+    prediction_cache_holder: dict[str, TraditionalPredictionCache] | None = None,
     progress=None,
     progress_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -226,7 +231,7 @@ def run_training(
             total=progress_context.get('total'),
         )
     fit_started = perf_counter()
-    model = MultiComponentPatentModel(config=config, component_names=prepared_data.train.component_names).fit(
+    model = TraditionalFusionModel(config=config, component_names=prepared_data.train.component_names).fit(
         prepared_data.train,
         branch_artifacts=branch_artifacts,
     )
@@ -272,6 +277,7 @@ def run_training(
         "mc_env_sigma_P": args.mc_env_sigma_p,
         "mc_env_sigma_H": args.mc_env_sigma_h,
         "metadata_filter": args.metadata_filter,
+        "stage_filter": args.stage_filter,
         "physical_range_filter": args.physical_range_filter,
         "label_closure_filter": args.label_closure_filter,
         "duplicate_filter": args.duplicate_filter,
@@ -300,40 +306,44 @@ def run_training(
         "prediction_cache_reused": prediction_cache_reused,
         "filter_report": prepared_data.train.filter_report,
         "metadata_filter_report": prepared_data.train.filter_report,
+        "stage_filter_report": prepared_data.train.filter_report.get("stage_filter"),
     }
-    meta_key = f"dynamic_{config.meta_model_type}"
-    meta_metrics = metrics[metrics["model"] == meta_key]
-    summary[f"{meta_key}_macro_RMSE_pp"] = float(meta_metrics["RMSE_pp"].mean())
-    summary[f"{meta_key}_macro_MRE_pct"] = float(meta_metrics["MRE_pct"].mean())
-    summary[f"{meta_key}_macro_R2"] = float(meta_metrics["R2"].mean())
-    summary[f"{meta_key}_macro_MaxRE_pct"] = float(meta_metrics["MaxRE_pct"].max())
+    modal_summary: dict[str, dict[str, float]] = {}
+    best_model_name = None
+    best_rmse = None
+    for model_name in ("acoustic", "optical", "thermal", "fused"):
+        modal_metrics = metrics[metrics["model"] == model_name]
+        modal_summary[model_name] = {
+            "macro_RMSE_pp": float(modal_metrics["RMSE_pp"].mean()),
+            "macro_MRE_pct": float(modal_metrics["MRE_pct"].mean()),
+            "macro_R2": float(modal_metrics["R2"].mean()),
+            "macro_MaxRE_pct": float(modal_metrics["MaxRE_pct"].max()),
+        }
+        summary[f"{model_name}_macro_RMSE_pp"] = modal_summary[model_name]["macro_RMSE_pp"]
+        summary[f"{model_name}_macro_MRE_pct"] = modal_summary[model_name]["macro_MRE_pct"]
+        summary[f"{model_name}_macro_R2"] = modal_summary[model_name]["macro_R2"]
+        summary[f"{model_name}_macro_MaxRE_pct"] = modal_summary[model_name]["macro_MaxRE_pct"]
+        if best_rmse is None or modal_summary[model_name]["macro_RMSE_pp"] < best_rmse:
+            best_rmse = modal_summary[model_name]["macro_RMSE_pp"]
+            best_model_name = model_name
+    summary["best_model_by_macro_RMSE_pp"] = best_model_name
     if progress is not None:
         progress.update_metric(
-            macro_RMSE=summary[f"{meta_key}_macro_RMSE_pp"],
+            macro_RMSE=summary["fused_macro_RMSE_pp"],
             total_seconds=summary["total_seconds"],
             cache=prediction_cache_reused,
         )
-    summary["branch_effective_pls_components"] = [
-        {
-            "component": component_name,
-            "acoustic": model.models[component_idx].branch_effective_pls_components.get("acoustic"),
-            "optical": model.models[component_idx].branch_effective_pls_components.get("optical"),
-            "thermal": model.models[component_idx].branch_effective_pls_components.get("thermal"),
-        }
-        for component_idx, component_name in enumerate(prepared_data.test.component_names)
-    ]
-    summary["meta_effective_pls_components"] = [
-        {
-            "component": component_name,
-            "value": model.models[component_idx].meta_effective_pls_components,
-        }
-        for component_idx, component_name in enumerate(prepared_data.test.component_names)
-    ]
+    summary["modal_effective_pls_components"] = {
+        "acoustic": model.modal_effective_pls_components.get("acoustic"),
+        "optical": model.modal_effective_pls_components.get("optical"),
+        "thermal": model.modal_effective_pls_components.get("thermal"),
+        "fused": model.meta_effective_pls_components,
+    }
     (output / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info(
-        "training done %s_macro_RMSE_pp=%.4f",
-        meta_key,
-        summary[f"{meta_key}_macro_RMSE_pp"],
+        "training done fused_macro_RMSE_pp=%.4f best_model=%s",
+        summary["fused_macro_RMSE_pp"],
+        summary["best_model_by_macro_RMSE_pp"],
     )
     return summary
 
@@ -347,5 +357,3 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
 if __name__ == "__main__":
     main()
-
-

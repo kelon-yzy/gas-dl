@@ -22,20 +22,12 @@ MODEL_NAMES: tuple[str, ...] = (
     "acoustic",
     "optical",
     "thermal",
-    "fixed_average",
-    "dynamic_average",
-    "dynamic_ridge",
-    "dynamic_pls",
-    "dynamic_xgboost",
+    "fused",
 )
 
 MODEL_DISPLAY_NAMES_ZH: dict[str, str] = {
     "acoustic": "声学单模态",
     "optical": "光学单模态",
     "thermal": "热导单模态",
-    "fixed_average": "固定平均融合",
-    "dynamic_average": "动态权重平均",
-    "dynamic_ridge": "动态Ridge融合",
-    "dynamic_pls": "动态PLS融合",
-    "dynamic_xgboost": "动态XGBoost融合",
+    "fused": "动态融合输出",
 }

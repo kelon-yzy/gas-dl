@@ -16,7 +16,6 @@ import pandas as pd
 
 from patent_model.data_loader import grouped_train_test_split, load_patent_dataset
 from patent_model.dataset import PatentDataset
-from patent_model.environment_augmentation import augment_derived_env_training_data
 from patent_model.feature_profiles import FEATURE_PROFILES
 from patent_model.fault_labels import build_observed_fault_labels
 from patent_model.logging_utils import get_logger
@@ -34,9 +33,9 @@ from patent_model.robustness import (
 )
 from scripts._cli_utils import limit_dataset, positive_int
 from scripts.environment_compensation_common import (
+    META_KEY,
     PROFILES,
     add_model_args,
-    build_meta_key,
     build_model_config,
     profile_data_dir,
     require_known_profile_mode,
@@ -84,61 +83,58 @@ def _load_split_model(args: argparse.Namespace, profile: str) -> tuple[MultiComp
     train = limit_dataset(train, args.train_limit)
     test = limit_dataset(test, args.test_limit)
     train_original_samples = train.n_samples
-    if profile == "derived_env_mc_aug":
-        train = augment_derived_env_training_data(
-            train,
-            mc_samples=args.mc_env_samples,
-            sigma_t=args.mc_env_sigma_t,
-            sigma_p=args.mc_env_sigma_p,
-            sigma_h=args.mc_env_sigma_h,
-            seed=args.seed,
-            profile=feature_profile_name,
-        )
     config = build_model_config(args, feature_profile_name)
     model = MultiComponentPatentModel(config=config, component_names=train.component_names).fit(train)
     return model, train, test, train_original_samples
 
 
-def _detection_macro_by_profile(path: Path, meta_key: str) -> dict[str, float]:
+def _detection_macro_by_profile(path: Path) -> dict[str, dict[str, float]]:
     if not path.exists():
         return {}
     metrics = pd.read_csv(path)
-    metrics = metrics[metrics["model"] == meta_key]
-    return metrics.groupby("profile")["RMSE_pp"].mean().to_dict()
+    grouped = metrics.groupby(["profile", "model"], as_index=False)["RMSE_pp"].mean()
+    output: dict[str, dict[str, float]] = {}
+    for row in grouped.itertuples(index=False):
+        output.setdefault(str(row.profile), {})[str(row.model)] = float(row.RMSE_pp)
+    return output
 
 
 def _build_summary(
     noise_metrics: pd.DataFrame,
     pressure_metrics: pd.DataFrame,
-    detection_macro: dict[str, float],
+    detection_macro: dict[str, dict[str, float]],
     meta_key: str,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for profile in PROFILES:
-        profile_noise = noise_metrics[(noise_metrics["profile"] == profile) & (noise_metrics["model"] == meta_key)]
-        noise_macro = profile_noise.groupby("noise_level")["RMSE_pp"].mean()
-        profile_pressure = pressure_metrics[(pressure_metrics["profile"] == profile) & (pressure_metrics["model"] == meta_key)]
-        pressure_macro = profile_pressure.groupby("pressure_bin")["RMSE_pp"].mean()
-        level_0 = float(noise_macro.get("level_0", np.nan))
-        worst_noise = float(noise_macro.max()) if not noise_macro.empty else np.nan
-        worst_pressure = float(pressure_macro.max()) if not pressure_macro.empty else np.nan
-        rows.append(
-            {
-                "profile": profile,
-                "detection_macro_RMSE_pp": detection_macro.get(profile, np.nan),
-                "noise_macro_RMSE_pp_level_0": level_0,
-                "noise_macro_RMSE_pp_worst": worst_noise,
-                "noise_macro_RMSE_pp_increase": worst_noise - level_0,
-                "pressure_macro_RMSE_pp_worst": worst_pressure,
-            }
-        )
+        profile_detection = detection_macro.get(profile, {})
+        for model_name in sorted(noise_metrics["model"].unique()):
+            profile_noise = noise_metrics[(noise_metrics["profile"] == profile) & (noise_metrics["model"] == model_name)]
+            noise_macro = profile_noise.groupby("noise_level")["RMSE_pp"].mean()
+            profile_pressure = pressure_metrics[(pressure_metrics["profile"] == profile) & (pressure_metrics["model"] == model_name)]
+            pressure_macro = profile_pressure.groupby("pressure_bin")["RMSE_pp"].mean()
+            level_0 = float(noise_macro.get("level_0", np.nan))
+            worst_noise = float(noise_macro.max()) if not noise_macro.empty else np.nan
+            worst_pressure = float(pressure_macro.max()) if not pressure_macro.empty else np.nan
+            rows.append(
+                {
+                    "profile": profile,
+                    "model_name": model_name,
+                    "detection_macro_RMSE_pp": profile_detection.get(model_name, np.nan),
+                    "noise_macro_RMSE_pp_level_0": level_0,
+                    "noise_macro_RMSE_pp_worst": worst_noise,
+                    "noise_macro_RMSE_pp_increase": worst_noise - level_0,
+                    "pressure_macro_RMSE_pp_worst": worst_pressure,
+                }
+            )
     return pd.DataFrame(rows)
 
 
 def _analysis(summary: pd.DataFrame, meta_key: str) -> dict[str, object]:
-    valid_detection = summary.dropna(subset=["detection_macro_RMSE_pp"])
-    valid_noise = summary.dropna(subset=["noise_macro_RMSE_pp_worst"])
-    valid_pressure = summary.dropna(subset=["pressure_macro_RMSE_pp_worst"])
+    fused = summary[summary["model_name"] == meta_key]
+    valid_detection = fused.dropna(subset=["detection_macro_RMSE_pp"])
+    valid_noise = fused.dropna(subset=["noise_macro_RMSE_pp_worst"])
+    valid_pressure = fused.dropna(subset=["pressure_macro_RMSE_pp_worst"])
     return {
         "main_metric": f"{meta_key} macro RMSE_pp",
         "best_detection_profile": None if valid_detection.empty else str(valid_detection.sort_values("detection_macro_RMSE_pp").iloc[0]["profile"]),
@@ -260,7 +256,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     args = build_parser().parse_args(argv)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    meta_key = build_meta_key(args.meta_model_type)
+    meta_key = META_KEY
 
     levels = DEFAULT_ENVIRONMENT_NOISE_LEVELS[: args.noise_level_count]
     noise_frames = []
@@ -290,7 +286,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
     all_noise = pd.concat(noise_frames, ignore_index=True)
     all_pressure = pd.concat(pressure_frames, ignore_index=True)
-    detection_macro = _detection_macro_by_profile(Path(args.compensation_results), meta_key)
+    detection_macro = _detection_macro_by_profile(Path(args.compensation_results))
     summary = _build_summary(all_noise, all_pressure, detection_macro, meta_key)
     analysis = _analysis(summary, meta_key)
     analysis["component_mode"] = args.component_mode

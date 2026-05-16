@@ -89,17 +89,17 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     pressure_bin_metrics.to_csv(output / "pressure_bin_metrics.csv", index=False)
 
     plot_noise_macro_rmse(noise_metrics, output / "noise_macro_rmse.png")
-    plot_noise_component_rmse(noise_metrics, output / "noise_component_rmse_dynamic_ridge.png")
+    plot_noise_component_rmse(noise_metrics, output / "noise_component_rmse_fused.png")
     plot_pressure_macro_rmse(pressure_bin_metrics, output / "pressure_macro_rmse.png")
-    plot_pressure_component_rmse(pressure_bin_metrics, output / "pressure_component_rmse_dynamic_ridge.png")
+    plot_pressure_component_rmse(pressure_bin_metrics, output / "pressure_component_rmse_fused.png")
     for metric_column, spec in METRIC_PLOT_SPECS.items():
         if metric_column == "RMSE_pp":
             continue
         metric_slug = spec["slug"]
         plot_noise_macro_metric(noise_metrics, output / f"noise_macro_{metric_slug}.png", metric_column)
-        plot_noise_component_metric(noise_metrics, output / f"noise_component_{metric_slug}_dynamic_ridge.png", metric_column)
+        plot_noise_component_metric(noise_metrics, output / f"noise_component_{metric_slug}_fused.png", metric_column)
         plot_pressure_macro_metric(pressure_bin_metrics, output / f"pressure_macro_{metric_slug}.png", metric_column)
-        plot_pressure_component_metric(pressure_bin_metrics, output / f"pressure_component_{metric_slug}_dynamic_ridge.png", metric_column)
+        plot_pressure_component_metric(pressure_bin_metrics, output / f"pressure_component_{metric_slug}_fused.png", metric_column)
 
     # 第 5 段：把这次实验的设置和输出清单写进 summary.json，方便回看。
     summary = {
@@ -118,21 +118,21 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             "pressure_stage_metrics.csv",
             "pressure_bin_metrics.csv",
             "noise_macro_rmse.png",
-            "noise_component_rmse_dynamic_ridge.png",
+            "noise_component_rmse_fused.png",
             "noise_macro_mre.png",
-            "noise_component_mre_dynamic_ridge.png",
+            "noise_component_mre_fused.png",
             "noise_macro_r2.png",
-            "noise_component_r2_dynamic_ridge.png",
+            "noise_component_r2_fused.png",
             "noise_macro_max_re.png",
-            "noise_component_max_re_dynamic_ridge.png",
+            "noise_component_max_re_fused.png",
             "pressure_macro_rmse.png",
-            "pressure_component_rmse_dynamic_ridge.png",
+            "pressure_component_rmse_fused.png",
             "pressure_macro_mre.png",
-            "pressure_component_mre_dynamic_ridge.png",
+            "pressure_component_mre_fused.png",
             "pressure_macro_r2.png",
-            "pressure_component_r2_dynamic_ridge.png",
+            "pressure_component_r2_fused.png",
             "pressure_macro_max_re.png",
-            "pressure_component_max_re_dynamic_ridge.png",
+            "pressure_component_max_re_fused.png",
         ],
     }
     (output / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")

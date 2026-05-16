@@ -9,6 +9,7 @@ import pandas as pd
 
 from patent_model.plotting_style import PROFILE_ORDER
 from scripts.report.constants import COMBO_ALIASES
+from scripts.environment_compensation_common import META_KEY
 from scripts.report.decision import _candidate_label, _normalize_combo_name, _split_combo_name
 
 
@@ -24,22 +25,23 @@ def _load_main_runs(outputs_root: Path) -> pd.DataFrame:
                 continue
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             meta_model_type = str(summary["meta_model_type"])
-            key = f"dynamic_{meta_model_type}"
-            rows.append(
-                {
-                    "profile": profile,
-                    "combo": run_dir.name,
-                    "branch": summary["branch_model_type"],
-                    "meta": meta_model_type,
-                    "macro_RMSE_pp": float(summary[f"{key}_macro_RMSE_pp"]),
-                    "macro_MRE_pct": float(summary[f"{key}_macro_MRE_pct"]),
-                    "macro_R2": float(summary[f"{key}_macro_R2"]),
-                    "macro_MaxRE_pct": float(summary[f"{key}_macro_MaxRE_pct"]),
-                    "train_samples": int(summary["train_samples"]),
-                    "test_samples": int(summary["test_samples"]),
-                    "run_dir": str(run_dir),
-                }
-            )
+            for key in ("acoustic", "optical", "thermal", META_KEY):
+                rows.append(
+                    {
+                        "profile": profile,
+                        "combo": run_dir.name,
+                        "branch": summary["branch_model_type"],
+                        "meta": meta_model_type,
+                        "model_name": key,
+                        "macro_RMSE_pp": float(summary[f"{key}_macro_RMSE_pp"]),
+                        "macro_MRE_pct": float(summary[f"{key}_macro_MRE_pct"]),
+                        "macro_R2": float(summary[f"{key}_macro_R2"]),
+                        "macro_MaxRE_pct": float(summary[f"{key}_macro_MaxRE_pct"]),
+                        "train_samples": int(summary["train_samples"]),
+                        "test_samples": int(summary["test_samples"]),
+                        "run_dir": str(run_dir),
+                    }
+                )
     frame = pd.DataFrame(rows)
     if frame.empty:
         raise FileNotFoundError("No four-component experiment summaries were found.")
@@ -48,8 +50,8 @@ def _load_main_runs(outputs_root: Path) -> pd.DataFrame:
 
 def _load_best_component_frame(run_dir: Path) -> pd.DataFrame:
     metrics = pd.read_csv(run_dir / "component_metrics.csv")
-    meta_model_type = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))["meta_model_type"]
-    key = f"dynamic_{meta_model_type}"
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    key = META_KEY
     return metrics[metrics["model"] == key].copy()
 
 
@@ -78,6 +80,7 @@ def _load_robustness_model_summary(outputs_root: Path) -> pd.DataFrame:
         summary.insert(1, "combo", combo)
         summary.insert(2, "branch", branch)
         summary.insert(3, "meta", meta)
+        summary.insert(4, "model_name", "fused")
         rows.extend(summary.to_dict("records"))
     if not rows:
         return pd.DataFrame(
@@ -106,7 +109,6 @@ def _load_component_candidates(candidate_rows: pd.DataFrame) -> pd.DataFrame:
         component_frame = _load_best_component_frame(Path(str(row.run_dir))).copy()
         component_frame.insert(0, "profile", row.profile)
         component_frame.insert(1, "combo", row.combo)
-        component_frame.insert(2, "candidate_label", _candidate_label(row.profile, row.combo))
+        component_frame.insert(2, "candidate_label", _candidate_label(row.profile, row.combo, row.model_name))
         rows.append(component_frame)
     return pd.concat(rows, ignore_index=True)
-

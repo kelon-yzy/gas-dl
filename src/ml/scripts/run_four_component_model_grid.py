@@ -71,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--mc-env-sigma-p", type=float, default=0.005)
   parser.add_argument("--mc-env-sigma-h", type=float, default=1.0)
   parser.add_argument("--metadata-filter", default="none")
+  parser.add_argument("--stage-filter", default="stable", choices=("none", "stable"))
   parser.add_argument("--physical-range-filter", default="none")
   parser.add_argument("--label-closure-filter", default="none")
   parser.add_argument("--duplicate-filter", default="per_mixture_limit")
@@ -135,6 +136,7 @@ def _build_train_args(args: argparse.Namespace, profile: str, branch_model_type:
   train_args.mc_env_sigma_p = args.mc_env_sigma_p
   train_args.mc_env_sigma_h = args.mc_env_sigma_h
   train_args.metadata_filter = args.metadata_filter
+  train_args.stage_filter = args.stage_filter
   train_args.physical_range_filter = args.physical_range_filter
   train_args.label_closure_filter = args.label_closure_filter
   train_args.duplicate_filter = args.duplicate_filter
@@ -144,6 +146,61 @@ def _build_train_args(args: argparse.Namespace, profile: str, branch_model_type:
 
 
 def _row_from_summary(profile: str, combo: str, summary: dict[str, object], combo_dir: Path) -> dict[str, object]:
+  return _rows_from_summary(profile, combo, summary, combo_dir)[-1]
+
+
+def _rows_from_summary(profile: str, combo: str, summary: dict[str, object], combo_dir: Path) -> list[dict[str, object]]:
+  rows = []
+  for model_name in ("acoustic", "optical", "thermal", "fused"):
+    row = {
+      "profile": profile,
+      "combo": combo,
+      "branch": summary["branch_model_type"],
+      "meta": summary["meta_model_type"],
+      "model_name": model_name,
+      "data_dir": summary["data_dir"],
+      "resolved_feature_profile": summary["resolved_feature_profile"],
+      "macro_RMSE_pp": summary[f"{model_name}_macro_RMSE_pp"],
+      "macro_MRE_pct": summary[f"{model_name}_macro_MRE_pct"],
+      "macro_R2": summary[f"{model_name}_macro_R2"],
+      "macro_MaxRE_pct": summary[f"{model_name}_macro_MaxRE_pct"],
+      "train_samples": summary["train_samples"],
+      "test_samples": summary["test_samples"],
+      "fit_seconds": summary.get("fit_seconds"),
+      "evaluate_seconds": summary.get("evaluate_seconds"),
+      "write_seconds": summary.get("write_seconds"),
+      "total_seconds": summary.get("total_seconds"),
+      "n_jobs": summary.get("n_jobs"),
+      "xgb_n_jobs": summary.get("xgb_n_jobs"),
+      "prediction_cache_reused": summary.get("prediction_cache_reused"),
+      "metadata_filter": summary.get("metadata_filter"),
+      "stage_filter": summary.get("stage_filter"),
+      "physical_range_filter": summary.get("physical_range_filter"),
+      "label_closure_filter": summary.get("label_closure_filter"),
+      "duplicate_filter": summary.get("duplicate_filter"),
+      "best_model_by_macro_RMSE_pp": summary.get("best_model_by_macro_RMSE_pp"),
+      "run_dir": str(combo_dir),
+    }
+    filter_report = summary.get("filter_report", {})
+    if isinstance(filter_report, dict):
+      for report_name in ("metadata_filter", "stage_filter", "physical_range_filter", "label_closure_filter", "duplicate_filter"):
+        report = filter_report.get(report_name)
+        if not isinstance(report, dict):
+          continue
+        for field_name in (
+          "before_samples",
+          "after_samples",
+          "removed_samples",
+          "before_unique_mixtures",
+          "after_unique_mixtures",
+        ):
+          if field_name in report:
+            row[f"{report_name}_{field_name}"] = report[field_name]
+    rows.append(row)
+  return rows
+
+
+def _legacy_row_from_summary(profile: str, combo: str, summary: dict[str, object], combo_dir: Path) -> dict[str, object]:
   row = {
     "profile": profile,
     "combo": combo,
@@ -165,6 +222,7 @@ def _row_from_summary(profile: str, combo: str, summary: dict[str, object], comb
     "xgb_n_jobs": summary.get("xgb_n_jobs"),
     "prediction_cache_reused": summary.get("prediction_cache_reused"),
     "metadata_filter": summary.get("metadata_filter"),
+    "stage_filter": summary.get("stage_filter"),
     "physical_range_filter": summary.get("physical_range_filter"),
     "label_closure_filter": summary.get("label_closure_filter"),
     "duplicate_filter": summary.get("duplicate_filter"),
@@ -172,7 +230,7 @@ def _row_from_summary(profile: str, combo: str, summary: dict[str, object], comb
   }
   filter_report = summary.get("filter_report", {})
   if isinstance(filter_report, dict):
-    for report_name in ("metadata_filter", "physical_range_filter", "label_closure_filter", "duplicate_filter"):
+    for report_name in ("metadata_filter", "stage_filter", "physical_range_filter", "label_closure_filter", "duplicate_filter"):
       report = filter_report.get(report_name)
       if not isinstance(report, dict):
         continue
@@ -249,11 +307,11 @@ def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: Execu
         "total": total_runs,
       },
     )
-    rows.append(_row_from_summary(profile, combo, summary, combo_dir))
+    rows.extend(_rows_from_summary(profile, combo, summary, combo_dir))
     run_count += 1
     if progress is not None:
       progress.log_message(
-        f"completed {combo} macro_RMSE={summary[f'dynamic_{summary['meta_model_type']}_macro_RMSE_pp']:.4f} total={summary.get('total_seconds', 0.0):.2f}s cache={summary.get('prediction_cache_reused')}"
+        f"completed {combo} fused_macro_RMSE={summary['fused_macro_RMSE_pp']:.4f} total={summary.get('total_seconds', 0.0):.2f}s cache={summary.get('prediction_cache_reused')}"
       )
       progress.update_stage(
         stage="write_summary",
@@ -289,7 +347,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
         rows.extend(result.rows)
         run_count += result.run_count
 
-  frame = pd.DataFrame(rows).sort_values(["profile", "combo"]).reset_index(drop=True)
+  frame = pd.DataFrame(rows).sort_values(["profile", "combo", "model_name"]).reset_index(drop=True)
   summary_path = output_root / f"four_component_{args.tag}_grid_summary.csv"
   frame.to_csv(summary_path, index=False)
   analysis = {

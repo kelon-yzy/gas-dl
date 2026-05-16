@@ -139,7 +139,7 @@ def _aggregate_results(output_dir: Path, combo_results: list[dict[str, object]])
 
   full_summary = pd.concat(rows, ignore_index=True)
   ranking = (
-    full_summary.groupby(["combo", "branch_model_type", "meta_model_type"], as_index=False)
+    full_summary.groupby(["combo", "branch_model_type", "meta_model_type", "model_name"], as_index=False)
     .agg(
       mean_detection_rmse=("detection_macro_RMSE_pp", "mean"),
       mean_noise_worst_rmse=("noise_macro_RMSE_pp_worst", "mean"),
@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     "component_mode": args.component_mode,
     "combo_count": len(combo_results),
     "profiles": sorted(full_summary["profile"].unique().tolist()),
-    "best_combo": None if ranking.empty else str(ranking.iloc[0]["combo"]),
+    "best_combo": None if ranking.empty else str((ranking[ranking["model_name"] == "fused"] if (ranking["model_name"] == "fused").any() else ranking).iloc[0]["combo"]),
     "outputs": [
       "robustness_grid_summary.csv",
       "robustness_grid_ranking.csv",

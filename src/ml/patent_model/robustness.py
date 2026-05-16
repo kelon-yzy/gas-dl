@@ -16,6 +16,7 @@ import pandas as pd
 
 from patent_model.config import MODEL_DISPLAY_NAMES_ZH, MODEL_NAMES
 from patent_model.dataset import PatentDataset
+from patent_model.feature_profiles import has_embedded_environment
 from patent_model.modeling import MultiComponentPatentModel
 from patent_model.plotting_style import setup_chinese_fonts
 
@@ -156,7 +157,10 @@ def _update_columns(values: np.ndarray, columns: tuple[str, ...], replacements: 
 
 
 def _uses_embedded_derived_environment(profile: str) -> bool:
-    return profile in {"derived_env", "derived_env_mc_aug", "derived_env_four"}
+    if has_embedded_environment(profile):
+        return True
+    # V1 virtual profile not registered in FEATURE_PROFILES
+    return profile in {"derived_env_mc_aug"}
 
 
 def add_profile_environment_noise(
@@ -226,10 +230,16 @@ def select_pressure_slice(
         # 指定样本数时，直接取最接近目标压力的前 N 条。
         order = order[: min(max_samples, dataset.n_samples)]
     else:
-        # 不指定样本数时，自动围出一个足够小的压力邻域。
-        nearest_pressure = pressure[order[0]]
-        tolerance = max(0.005, abs(nearest_pressure - target_pressure_mpa) + 1e-12)
+        # Fixed tolerance of ~5 kPa; raise if no sample falls within this range.
+        tolerance = 0.005
         order = np.flatnonzero(np.abs(pressure - target_pressure_mpa) <= tolerance)
+        if order.size == 0:
+            nearest_pressure = pressure[np.argmin(np.abs(pressure - target_pressure_mpa))]
+            raise ValueError(
+                f"No samples within {tolerance} MPa of target {target_pressure_mpa:.6f} MPa. "
+                f"Nearest pressure is {nearest_pressure:.6f} MPa. "
+                f"Pass max_samples to select by rank instead."
+            )
     selected = dataset.subset(np.array(order, dtype=int))
     metadata = selected.metadata.copy()
     metadata["noise_pressure_target_mpa"] = target_pressure_mpa
@@ -388,7 +398,7 @@ def plot_noise_macro_metric(metrics: pd.DataFrame, output_path: str | Path, metr
     }
     x = np.arange(len(order))
     fig, ax = plt.subplots(figsize=(9, 5))
-    # 一张图里对比所有模型家族，便于看融合策略和单模态谁更稳。
+    # 一张图里对比 acoustic/optical/thermal/fused 四类结果，便于看动态融合是否优于单模态。
     for model_name in MODEL_NAMES:
         values = macro[macro["model"] == model_name].set_index("noise_level").reindex(order)
         if values.empty:
@@ -412,7 +422,7 @@ def plot_noise_macro_rmse(metrics: pd.DataFrame, output_path: str | Path) -> Non
     plot_noise_macro_metric(metrics, output_path, "RMSE_pp")
 
 
-def plot_noise_component_metric(metrics: pd.DataFrame, output_path: str | Path, metric_column: str, model_name: str = "dynamic_ridge") -> None:
+def plot_noise_component_metric(metrics: pd.DataFrame, output_path: str | Path, metric_column: str, model_name: str = "fused") -> None:
     """绘制指定融合模型下，各组分随噪声变化的曲线。"""
 
     spec = _metric_spec(metric_column)
@@ -442,7 +452,7 @@ def plot_noise_component_metric(metrics: pd.DataFrame, output_path: str | Path, 
     plt.close(fig)
 
 
-def plot_noise_component_rmse(metrics: pd.DataFrame, output_path: str | Path, model_name: str = "dynamic_ridge") -> None:
+def plot_noise_component_rmse(metrics: pd.DataFrame, output_path: str | Path, model_name: str = "fused") -> None:
     """绘制各组分 RMSE 噪声曲线。"""
 
     plot_noise_component_metric(metrics, output_path, "RMSE_pp", model_name)
@@ -480,7 +490,7 @@ def plot_pressure_component_metric(
     metrics: pd.DataFrame,
     output_path: str | Path,
     metric_column: str,
-    model_name: str = "dynamic_ridge",
+    model_name: str = "fused",
 ) -> None:
     """绘制指定融合模型下，各组分随压力变化的曲线。"""
 
@@ -504,7 +514,7 @@ def plot_pressure_component_metric(
 def plot_pressure_component_rmse(
     metrics: pd.DataFrame,
     output_path: str | Path,
-    model_name: str = "dynamic_ridge",
+    model_name: str = "fused",
 ) -> None:
     """绘制各组分 RMSE 压力曲线。"""
 
