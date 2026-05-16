@@ -24,9 +24,15 @@ training:
   epochs: 200
   batch_size: 8
   device: auto
+  optimizer: adamw
   learning_rate: 0.001
-  weight_decay: 0.0001
+  weight_decay: 0.01
   loss: mse
   early_stopping_patience: 25
   num_workers: 2
   eval_num_workers: 1
+  grad_clip_norm: 1.0
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 5
+    eta_min: 0.0001

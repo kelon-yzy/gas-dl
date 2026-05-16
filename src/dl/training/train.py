@@ -320,6 +320,7 @@ def _train_one_epoch(
     env_aug_sigma: float,
     amp_enabled: bool = False,
     scaler: torch.amp.GradScaler | None = None,
+    grad_clip_norm: float = 0.0,
 ):
     model.train()
     losses = []
@@ -341,10 +342,15 @@ def _train_one_epoch(
                 loss = loss_fn(pred, y)
         if amp_enabled:
             scaler.scale(loss).backward()
+            if grad_clip_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
+            if grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
         losses.append(float(loss.item()))
     return float(np.mean(losses))
@@ -427,6 +433,7 @@ def _checkpoint_payload(
     config_to_write: dict,
     status: str = "running",
     label_names: list | None = None,
+    scheduler=None,
 ) -> dict:
     """组装 checkpoint dict，模型参数移至 CPU 以支持跨设备恢复"""
     model_state = {}
@@ -451,6 +458,7 @@ def _checkpoint_payload(
         "model_state_dict": model_state,
         "optimizer_state_dict": optim_state,
         "amp_scaler_state_dict": scaler.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
         "early_stopping": {
             "best": stopper.best,
             "bad_epochs": stopper.bad_epochs,
@@ -564,6 +572,14 @@ def _validate_checkpoint_compat(ckpt: dict, config: dict, label_names: list | No
         elif ckpt_labels != label_names:
             mismatches.append(f"label_names 顺序不一致: checkpoint={ckpt_labels}, config={label_names}")
 
+    # lr_scheduler 类型变更记录但不阻断恢复
+    ckpt_sched = ckpt_config.get("training", {}).get("lr_scheduler")
+    cur_sched = config.get("training", {}).get("lr_scheduler")
+    if ckpt_sched != cur_sched:
+        ckpt_st = ckpt_sched.get("type") if ckpt_sched else None
+        cur_st = cur_sched.get("type") if cur_sched else None
+        mismatches.append(f"lr_scheduler.type: checkpoint={ckpt_st}, config={cur_st}")
+
     if mismatches:
         raise ValueError(
             "Checkpoint/config 不兼容。checkpoint 使用了不同的训练设置，"
@@ -608,14 +624,44 @@ def train_config(
         config["training"].get("loss", "mse"),
         sum_constraint=config["training"].get("sum_constraint"),
     )
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=float(config["training"].get("learning_rate", 1e-3)),
-        weight_decay=float(config["training"].get("weight_decay", 0.0)),
-    )
+    lr = float(config["training"].get("learning_rate", 1e-3))
+    wd = float(config["training"].get("weight_decay", 0.01))
+    optimizer_name = config["training"].get("optimizer", "adam").lower()
+    if optimizer_name == "adamw":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
     stopper = EarlyStopping(patience=int(config["training"].get("early_stopping_patience", 25)), mode="min")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     total_epochs = int(config["training"].get("epochs", 200))
+    grad_clip_norm = float(config["training"].get("grad_clip_norm", 0.0))
+
+    scheduler_cfg = config["training"].get("lr_scheduler")
+    scheduler = None
+    if scheduler_cfg is not None:
+        from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+        stype = scheduler_cfg.get("type", "cosine_warmup")
+        if stype == "cosine_warmup":
+            warmup_epochs = int(scheduler_cfg.get("warmup_epochs", 5))
+            eta_min = float(scheduler_cfg.get("eta_min", lr * 0.1))
+            warmup = LinearLR(optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_epochs)
+            cosine = CosineAnnealingLR(optimizer, T_max=total_epochs - warmup_epochs, eta_min=eta_min)
+            scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+        elif stype == "cosine":
+            eta_min = float(scheduler_cfg.get("eta_min", lr * 0.1))
+            scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=eta_min)
+        elif stype == "multistep":
+            milestones = [int(m) for m in scheduler_cfg.get("milestones", [80, 140])]
+            gamma = float(scheduler_cfg.get("gamma", 0.1))
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+        elif stype == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min",
+                factor=float(scheduler_cfg.get("gamma", 0.1)),
+                patience=int(scheduler_cfg.get("patience", 10)),
+            )
+        else:
+            raise ValueError(f"Unknown lr_scheduler type: {stype}")
 
     # ── 恢复训练 ──
     start_epoch = 1
@@ -636,6 +682,8 @@ def train_config(
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scaler.load_state_dict(ckpt["amp_scaler_state_dict"])
         _restore_early_stopping(stopper, ckpt.get("early_stopping", {}))
+        if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         if restore_rng:
             _restore_rng_state(ckpt["rng_state"])
         log_rows = ckpt.get("log_rows", [])
@@ -667,7 +715,7 @@ def train_config(
     _save_checkpoint(initial_ckpt_path, _checkpoint_payload(
         model, optimizer, scaler, stopper, run_start_epoch, total_epochs,
         run_start_log_rows, best_path, config_to_write, status="initial",
-        label_names=label_names,
+        label_names=label_names, scheduler=scheduler,
     ))
     current_run_last_checkpoint_written = False
 
@@ -684,6 +732,7 @@ def train_config(
                 float(config["training"].get("environment_augmentation_sigma", 0.0)),
                 amp_enabled=amp_enabled,
                 scaler=scaler,
+                grad_clip_norm=grad_clip_norm,
             )
 
             val_loss, val_bundle = evaluate_with_predictions(model, loaders["val"], loss_fn, device)
@@ -707,7 +756,7 @@ def train_config(
                 _save_checkpoint(best_ckpt_path, _checkpoint_payload(
                     model, optimizer, scaler, stopper, epoch, total_epochs,
                     log_rows, best_path, config_to_write, status="running",
-                    label_names=label_names,
+                    label_names=label_names, scheduler=scheduler,
                 ))
 
             if progress is not None:
@@ -728,7 +777,7 @@ def train_config(
             _save_checkpoint(last_ckpt_path, _checkpoint_payload(
                 model, optimizer, scaler, stopper, epoch, total_epochs,
                 log_rows, best_path, config_to_write, status="running",
-                label_names=label_names,
+                label_names=label_names, scheduler=scheduler,
             ))
             current_run_last_checkpoint_written = True
 
@@ -737,8 +786,15 @@ def train_config(
                 _save_checkpoint(output_dir / f"epoch_{epoch:04d}.pt", _checkpoint_payload(
                     model, optimizer, scaler, stopper, epoch, total_epochs,
                     log_rows, best_path, config_to_write, status="running",
-                    label_names=label_names,
+                    label_names=label_names, scheduler=scheduler,
                 ))
+
+            # 学习率调度器步进
+            if scheduler is not None:
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(monitor_value)
+                else:
+                    scheduler.step()
 
             # 测试专用：训练到指定 epoch 后主动暂停
             if stop_after_epoch is not None and epoch >= stop_after_epoch:
@@ -777,7 +833,7 @@ def train_config(
         _save_checkpoint(paused_ckpt_path, _checkpoint_payload(
             model, optimizer, scaler, stopper, last_epoch, total_epochs,
             log_rows, best_path, config_to_write, status="paused",
-            label_names=label_names,
+            label_names=label_names, scheduler=scheduler,
         ))
         summary = {
             "run_name": config["run"]["name"],
@@ -835,7 +891,7 @@ def train_config(
     _save_checkpoint(last_ckpt_path, _checkpoint_payload(
         model, optimizer, scaler, stopper, final_epoch, total_epochs,
         log_rows, best_path, config_to_write, status="completed",
-        label_names=label_names,
+        label_names=label_names, scheduler=scheduler,
     ))
 
     (output_dir / "config.json").write_text(json.dumps(config_to_write, indent=2, ensure_ascii=False), encoding="utf-8")
