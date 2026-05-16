@@ -1,2 +1,0 @@
-exp_id	model	seed	status	started	finished	macro_RMSE	notes
-exp01_traditional	grid	42	running	2026-05-14 15:16:00			log=outputs/exp01_traditional/logs/train_seed42.log

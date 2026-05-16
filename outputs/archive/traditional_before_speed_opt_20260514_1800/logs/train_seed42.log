@@ -1,6 +1,0 @@
-[2026-05-14 15:16:02,442] [INFO] [scripts.run_four_component_model_grid] grid item profile=v3_raw_no_env branch=svr meta_count=3
-[2026-05-14 15:40:39,946] [INFO] [scripts.train_patent_model] training profile=v3_waveform_dual_channel_four branch=svr meta=ridge train=31696 test=8304
-[2026-05-14 16:31:30,067] [INFO] [scripts.train_patent_model] training done dynamic_ridge_macro_RMSE_pp=3.9847
-[2026-05-14 16:31:30,071] [INFO] [scripts.train_patent_model] training profile=v3_waveform_dual_channel_four branch=svr meta=pls train=31696 test=8304
-[2026-05-14 17:22:18,457] [INFO] [scripts.train_patent_model] training done dynamic_pls_macro_RMSE_pp=3.9840
-[2026-05-14 17:22:18,462] [INFO] [scripts.train_patent_model] training profile=v3_waveform_dual_channel_four branch=svr meta=xgboost train=31696 test=8304
