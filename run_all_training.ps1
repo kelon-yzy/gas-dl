@@ -12,10 +12,18 @@ $logFile = "$outputRoot/training_log.txt"
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 
 $models = @(
-    @{Name="TCN (纯慢变量)";           Config="configs/deep/slow_only_tcn_formal.yaml"},
-    @{Name="LSTM (纯慢变量)";          Config="configs/deep/slow_only_lstm_formal.yaml"},
-    @{Name="MultimodalFusionV3 (纯多模态)"; Config="configs/deep/waveform_only_formal.yaml"},
-    @{Name="MultimodalFusionV3 (全融合+AMP)"; Config="configs/deep/fusion_formal.yaml"}
+    @{Name="GRU (纯慢变量)";               Config="configs/deep/slow_only_gru_formal.yaml"},
+    @{Name="LSTM (纯慢变量)";              Config="configs/deep/slow_only_lstm_formal.yaml"},
+    @{Name="TCN (纯慢变量)";               Config="configs/deep/slow_only_tcn_formal.yaml"},
+    @{Name="Transformer (纯慢变量)";         Config="configs/deep/slow_only_transformer_formal.yaml"},
+    @{Name="BranchFusion (纯慢变量)";        Config="configs/deep/slow_only_branch_fusion_formal.yaml"},
+    @{Name="MultimodalFusionV3 (纯多模态)";   Config="configs/deep/waveform_only_formal.yaml"},
+    @{Name="CNN1D_Multimodal (融合)";        Config="configs/deep/slow_only_cnn1d_multimodal_formal.yaml"},
+    @{Name="GRU_Multimodal (融合)";          Config="configs/deep/slow_only_gru_multimodal_formal.yaml"},
+    @{Name="LSTM_Multimodal (融合)";         Config="configs/deep/slow_only_lstm_multimodal_formal.yaml"},
+    @{Name="TCN_Multimodal (融合)";          Config="configs/deep/slow_only_tcn_multimodal_formal.yaml"},
+    @{Name="Transformer_Multimodal (融合)";   Config="configs/deep/slow_only_transformer_multimodal_formal.yaml"},
+    @{Name="CNN-LSTM_Multimodal (融合)";      Config="configs/deep/slow_only_cnn_lstm_multimodal_formal.yaml"}
 )
 
 $total = $models.Count

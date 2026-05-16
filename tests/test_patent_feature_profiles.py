@@ -10,6 +10,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "ml"))
 sys.path.insert(0, str(ROOT / "src" / "sim"))
+sys.modules.pop("scripts", None)
 
 from patent_model.feature_profiles import (
     DUAL_WAVEFORM_ACOUSTIC_COLUMNS,

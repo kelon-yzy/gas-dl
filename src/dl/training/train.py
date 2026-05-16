@@ -366,24 +366,50 @@ def save_predictions(path: Path, meta: pd.DataFrame, y_true, y_pred, split: str,
 # ── checkpoint helpers ──────────────────────────────────────────
 
 def _capture_rng_state() -> dict:
-    """捕获当前所有随机数生成器状态"""
+    """捕获当前所有随机数生成器状态（weights_only 兼容格式：仅含 Tensor 与基础类型）"""
     cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    numpy_state = np.random.get_state()
     return {
         "torch": torch.get_rng_state(),
         "cuda": cuda_state,
-        "numpy": np.random.get_state(),
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "state": torch.from_numpy(numpy_state[1].copy()),
+            "pos": numpy_state[2],
+            "has_gauss": numpy_state[3],
+            "cached_gaussian": numpy_state[4],
+        },
     }
 
 
 def _restore_rng_state(state: dict) -> None:
-    """恢复随机数生成器状态"""
+    """恢复随机数生成器状态（兼容旧版 tuple 格式和新版 dict 格式）"""
     t_state = state["torch"]
     if t_state.device.type != "cpu":
         t_state = t_state.cpu()
     torch.set_rng_state(t_state)
     if state.get("cuda") and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["cuda"])
-    np.random.set_state(state["numpy"])
+    numpy_data = state.get("numpy")
+    if numpy_data is None:
+        return
+    if isinstance(numpy_data, tuple):
+        # 旧版格式：直接是 (str, ndarray, int, int, float)
+        np.random.set_state(numpy_data)
+    else:
+        # 新版格式：dict with tensor
+        numpy_values = numpy_data["state"]
+        if torch.is_tensor(numpy_values):
+            if numpy_values.device.type != "cpu":
+                numpy_values = numpy_values.cpu()
+            numpy_values = numpy_values.numpy()
+        np.random.set_state((
+            numpy_data["bit_generator"],
+            numpy_values,
+            numpy_data["pos"],
+            numpy_data["has_gauss"],
+            numpy_data["cached_gaussian"],
+        ))
 
 
 def _checkpoint_payload(
@@ -397,6 +423,7 @@ def _checkpoint_payload(
     best_path: Path,
     config_to_write: dict,
     status: str = "running",
+    label_names: list | None = None,
 ) -> dict:
     """组装 checkpoint dict，模型参数移至 CPU 以支持跨设备恢复"""
     model_state = {}
@@ -417,6 +444,7 @@ def _checkpoint_payload(
         "total_epochs": total_epochs,
         "config": config_to_write,
         "model_name": config_to_write.get("model", {}).get("name"),
+        "label_names": label_names,
         "model_state_dict": model_state,
         "optimizer_state_dict": optim_state,
         "amp_scaler_state_dict": scaler.state_dict(),
@@ -441,10 +469,16 @@ def _save_checkpoint(path: Path, payload: dict) -> None:
 
 
 def _load_checkpoint(path: Path, device: torch.device) -> dict:
-    """加载 checkpoint 并做基本校验"""
+    """安全加载 checkpoint；拒绝需要 pickle 反序列化的旧格式。"""
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    try:
+        ckpt = torch.load(path, map_location=device, weights_only=True)
+    except Exception as exc:
+        raise ValueError(
+            f"Checkpoint cannot be loaded safely with weights_only=True: {path}. "
+            "Only load checkpoints produced by the current safe checkpoint format."
+        ) from exc
     if not isinstance(ckpt, dict):
         raise ValueError(f"Checkpoint is not a dict: {type(ckpt)}")
     if ckpt.get("format_version") != 1:
@@ -462,8 +496,19 @@ def _restore_early_stopping(stopper: "EarlyStopping", state: dict) -> None:
         stopper.mode = state["mode"]
 
 
-def _validate_checkpoint_compat(ckpt: dict, config: dict) -> None:
-    """校验 checkpoint 与当前配置的兼容性：模型名 + 必要键"""
+def _compare_config_key(mismatches: list[str], ckpt_section: dict, cur_section: dict, prefix: str, key: str) -> None:
+    sentinel = object()
+    ckpt_value = ckpt_section.get(key, sentinel)
+    cur_value = cur_section.get(key, sentinel)
+    if ckpt_value == cur_value:
+        return
+    ckpt_display = "<missing>" if ckpt_value is sentinel else ckpt_value
+    cur_display = "<missing>" if cur_value is sentinel else cur_value
+    mismatches.append(f"{prefix}.{key}: checkpoint={ckpt_display}, config={cur_display}")
+
+
+def _validate_checkpoint_compat(ckpt: dict, config: dict, label_names: list | None = None) -> None:
+    """校验 checkpoint 与当前配置的兼容性：模型名、数据集类型、时间窗口、波形模式、输出维度、标签名"""
     ckpt_model = ckpt.get("model_name")
     cur_model = config.get("model", {}).get("name")
     if ckpt_model and cur_model and ckpt_model != cur_model:
@@ -478,6 +523,50 @@ def _validate_checkpoint_compat(ckpt: dict, config: dict) -> None:
     missing = [k for k in required if k not in ckpt]
     if missing:
         raise ValueError(f"Checkpoint missing required keys: {missing}")
+
+    # ── 深度兼容性校验：防止静默污染实验结果 ──
+    ckpt_config = ckpt.get("config", {})
+    if not ckpt_config:
+        return  # 旧版 checkpoint 无 config，跳过深度校验
+
+    mismatches = []
+
+    ckpt_data = ckpt_config.get("data", {})
+    cur_data = config.get("data", {})
+    for key in (
+        "dataset_type",
+        "npz_path",
+        "index_path",
+        "split_dir",
+        "split_strategy",
+        "input_format",
+        "time_window",
+        "channels",
+        "acoustic_feature_path",
+        "acoustic_features",
+    ):
+        _compare_config_key(mismatches, ckpt_data, cur_data, "data", key)
+
+    ckpt_model_config = ckpt_config.get("model", {})
+    cur_model_config = config.get("model", {})
+    model_keys = sorted(set(ckpt_model_config).union(cur_model_config).difference({"name"}))
+    for key in model_keys:
+        _compare_config_key(mismatches, ckpt_model_config, cur_model_config, "model", key)
+
+    # 输出维度（通过 label_names 长度）
+    ckpt_labels = ckpt.get("label_names")
+    if ckpt_labels is not None and label_names is not None:
+        if len(ckpt_labels) != len(label_names):
+            mismatches.append(f"out_dim: checkpoint={len(ckpt_labels)}, config={len(label_names)}")
+        elif ckpt_labels != label_names:
+            mismatches.append(f"label_names 顺序不一致: checkpoint={ckpt_labels}, config={label_names}")
+
+    if mismatches:
+        raise ValueError(
+            "Checkpoint/config 不兼容。checkpoint 使用了不同的训练设置，"
+            "恢复训练将导致实验结果不可比。请使用匹配的配置文件或从头训练。\n"
+            "差异项:\n" + "\n".join(f"  - {m}" for m in mismatches)
+        )
 
 
 # ── main training ──────────────────────────────────────────────
@@ -532,13 +621,14 @@ def train_config(
     last_ckpt_path = output_dir / "last_checkpoint.pt"
     best_ckpt_path = output_dir / "best_checkpoint.pt"
     paused_ckpt_path = output_dir / "paused_checkpoint.pt"
+    initial_ckpt_path = output_dir / "initial_checkpoint.pt"
     resumed_from = None
 
     progress = config.get("_cli_progress")
     if resume_path:
         resume_path = Path(resume_path)
         ckpt = _load_checkpoint(resume_path, device)
-        _validate_checkpoint_compat(ckpt, config)
+        _validate_checkpoint_compat(ckpt, config, label_names)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scaler.load_state_dict(ckpt["amp_scaler_state_dict"])
@@ -567,6 +657,16 @@ def train_config(
     config_to_write = {k: v for k, v in config.items() if not k.startswith("_")}
     training_status = "completed"
     paused = False
+
+    # 训练开始前保存初始状态快照，供首 epoch Ctrl+C 回滚使用
+    run_start_epoch = start_epoch - 1
+    run_start_log_rows = list(log_rows)
+    _save_checkpoint(initial_ckpt_path, _checkpoint_payload(
+        model, optimizer, scaler, stopper, run_start_epoch, total_epochs,
+        run_start_log_rows, best_path, config_to_write, status="initial",
+        label_names=label_names,
+    ))
+    current_run_last_checkpoint_written = False
 
     try:
         for epoch in range(start_epoch, total_epochs + 1):
@@ -604,6 +704,7 @@ def train_config(
                 _save_checkpoint(best_ckpt_path, _checkpoint_payload(
                     model, optimizer, scaler, stopper, epoch, total_epochs,
                     log_rows, best_path, config_to_write, status="running",
+                    label_names=label_names,
                 ))
 
             if progress is not None:
@@ -624,13 +725,16 @@ def train_config(
             _save_checkpoint(last_ckpt_path, _checkpoint_payload(
                 model, optimizer, scaler, stopper, epoch, total_epochs,
                 log_rows, best_path, config_to_write, status="running",
+                label_names=label_names,
             ))
+            current_run_last_checkpoint_written = True
 
             # 周期快照 epoch_XXXX.pt
             if checkpoint_every > 0 and epoch % checkpoint_every == 0:
                 _save_checkpoint(output_dir / f"epoch_{epoch:04d}.pt", _checkpoint_payload(
                     model, optimizer, scaler, stopper, epoch, total_epochs,
                     log_rows, best_path, config_to_write, status="running",
+                    label_names=label_names,
                 ))
 
             # 测试专用：训练到指定 epoch 后主动暂停
@@ -650,10 +754,16 @@ def train_config(
         training_status = "paused"
         paused = True
         if progress is not None:
-            progress.log_message("用户中断 (Ctrl+C), 从 last_checkpoint 回退干净权重")
+            progress.log_message("用户中断 (Ctrl+C), 回退到最近完整 epoch 的干净权重")
         # 回退到最近完整 epoch 的干净权重，避免保存半轮训练状态
-        if last_ckpt_path.exists():
-            ckpt_clean = _load_checkpoint(last_ckpt_path, device)
+        # 优先 last_checkpoint，不存在则降级到 initial_checkpoint
+        restore_source = None
+        if current_run_last_checkpoint_written and last_ckpt_path.exists():
+            restore_source = last_ckpt_path
+        elif initial_ckpt_path.exists():
+            restore_source = initial_ckpt_path
+        if restore_source is not None:
+            ckpt_clean = _load_checkpoint(restore_source, device)
             model.load_state_dict(ckpt_clean["model_state_dict"])
             optimizer.load_state_dict(ckpt_clean["optimizer_state_dict"])
             scaler.load_state_dict(ckpt_clean["amp_scaler_state_dict"])
@@ -664,6 +774,7 @@ def train_config(
         _save_checkpoint(paused_ckpt_path, _checkpoint_payload(
             model, optimizer, scaler, stopper, last_epoch, total_epochs,
             log_rows, best_path, config_to_write, status="paused",
+            label_names=label_names,
         ))
         summary = {
             "run_name": config["run"]["name"],
@@ -721,6 +832,7 @@ def train_config(
     _save_checkpoint(last_ckpt_path, _checkpoint_payload(
         model, optimizer, scaler, stopper, final_epoch, total_epochs,
         log_rows, best_path, config_to_write, status="completed",
+        label_names=label_names,
     ))
 
     (output_dir / "config.json").write_text(json.dumps(config_to_write, indent=2, ensure_ascii=False), encoding="utf-8")

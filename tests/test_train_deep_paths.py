@@ -51,5 +51,99 @@ class TrainDeepPathTests(unittest.TestCase):
         self.assertEqual(captured["config"]["run"]["output_dir"], expected_output_dir)
 
 
+class MultimodalConfigTests(unittest.TestCase):
+    """校验 6 个 _multimodal_formal.yaml 存在且字段符合约定。"""
+
+    MULTIMODAL_CONFIGS = [
+        {
+            "file": "slow_only_cnn1d_multimodal_formal.yaml",
+            "model_name": "cnn1d_multimodal",
+            "run_name": "v3_cnn1d_multimodal_seed42",
+            "output_dir": "outputs/exp02_deep_e2e/v3_cnn1d_multimodal_seed42",
+        },
+        {
+            "file": "slow_only_gru_multimodal_formal.yaml",
+            "model_name": "gru_multimodal",
+            "run_name": "v3_gru_multimodal_seed42",
+            "output_dir": "outputs/exp02_deep_e2e/v3_gru_multimodal_seed42",
+        },
+        {
+            "file": "slow_only_lstm_multimodal_formal.yaml",
+            "model_name": "lstm_multimodal",
+            "run_name": "v3_lstm_multimodal_seed42",
+            "output_dir": "outputs/exp02_deep_e2e/v3_lstm_multimodal_seed42",
+        },
+        {
+            "file": "slow_only_tcn_multimodal_formal.yaml",
+            "model_name": "tcn_multimodal",
+            "run_name": "v3_tcn_multimodal_seed42",
+            "output_dir": "outputs/exp02_deep_e2e/v3_tcn_multimodal_seed42",
+        },
+        {
+            "file": "slow_only_transformer_multimodal_formal.yaml",
+            "model_name": "transformer_multimodal",
+            "run_name": "v3_transformer_multimodal_seed42",
+            "output_dir": "outputs/exp02_deep_e2e/v3_transformer_multimodal_seed42",
+        },
+        {
+            "file": "slow_only_cnn_lstm_multimodal_formal.yaml",
+            "model_name": "cnn_lstm_multimodal",
+            "run_name": "v3_cnn_lstm_multimodal_seed42",
+            "output_dir": "outputs/exp02_deep_e2e/v3_cnn_lstm_multimodal_seed42",
+        },
+    ]
+
+    def test_multimodal_configs_exist(self):
+        for cfg in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / cfg["file"]
+            self.assertTrue(path.exists(), f"配置文件不存在: {cfg['file']}")
+
+    def test_multimodal_configs_have_correct_model_name(self):
+        for entry in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / entry["file"]
+            with path.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            self.assertEqual(config["model"]["name"], entry["model_name"], f"{entry['file']} model.name 错误")
+
+    def test_multimodal_configs_have_correct_run_name(self):
+        for entry in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / entry["file"]
+            with path.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            self.assertEqual(config["run"]["name"], entry["run_name"], f"{entry['file']} run.name 错误")
+
+    def test_multimodal_configs_have_correct_output_dir(self):
+        for entry in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / entry["file"]
+            with path.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            self.assertEqual(config["run"]["output_dir"], entry["output_dir"], f"{entry['file']} run.output_dir 错误")
+
+    def test_multimodal_configs_have_slow_dim_and_out_dim(self):
+        for entry in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / entry["file"]
+            with path.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            self.assertEqual(config["model"]["slow_dim"], 8, f"{entry['file']} slow_dim 应为 8")
+            self.assertEqual(config["model"]["out_dim"], 4, f"{entry['file']} out_dim 应为 4")
+
+    def test_multimodal_configs_batch_size_is_8(self):
+        for entry in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / entry["file"]
+            with path.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            self.assertEqual(config["training"]["batch_size"], 8, f"{entry['file']} batch_size 应为 8")
+
+    def test_multimodal_configs_data_root_consistent(self):
+        for entry in self.MULTIMODAL_CONFIGS:
+            path = ROOT / "configs" / "deep" / entry["file"]
+            with path.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            self.assertEqual(config["data"]["dataset_type"], "waveform_v3")
+            self.assertEqual(config["data"]["npz_path"], "../../data/waveform_v3")
+            self.assertEqual(config["data"]["index_path"], "../../data/waveform_v3/sequence_index.csv")
+            self.assertEqual(config["data"]["split_dir"], "../../data/waveform_v3/splits")
+
+
 if __name__ == "__main__":
     unittest.main()

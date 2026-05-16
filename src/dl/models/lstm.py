@@ -7,6 +7,8 @@ from models.config_utils import merge_model_kwargs
 
 
 class LSTMRegressor(nn.Module):
+    input_format = "NTC"
+
     def __init__(self, config: dict | None = None, **kwargs):
         super().__init__()
         settings = merge_model_kwargs(

@@ -1,0 +1,34 @@
+run:
+  name: v3_cnn_lstm_multimodal_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_cnn_lstm_multimodal_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn_lstm_multimodal
+  slow_dim: 8
+  conv_channels: 64
+  hidden_size: 64
+  num_layers: 1
+  kernel_size: 5
+  dropout: 0.1
+  out_dim: 4
+
+training:
+  epochs: 200
+  batch_size: 8
+  device: auto
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  loss: mse
+  early_stopping_patience: 25
+  num_workers: 0
+  eval_num_workers: 0

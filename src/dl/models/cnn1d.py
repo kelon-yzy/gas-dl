@@ -5,6 +5,8 @@ from torch import nn
 
 
 class CNN1DRegressor(nn.Module):
+    input_format = "NCT"
+
     def __init__(
         self,
         in_channels: int = 12,

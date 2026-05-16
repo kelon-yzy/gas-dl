@@ -1,6 +1,6 @@
 # 实验设计文档
 
-> 创建日期：2026-05-14（v0.4，已同步 CLI 训练可视化）
+> 创建日期：2026-05-14（v0.5，接入 6 个 MultimodalWrapper 融合模型）
 > 项目：V3 正式实验（V3.1 dual-channel waveform ML vs DL 公平对比）
 
 ## 1. 三个验证目标
@@ -46,15 +46,23 @@
 
 ### G1 实验矩阵
 
-| 实验组 | 模型 | 输入 | seed | 输出目录 |
-| -------- | -------------------------- | -------------------------------------------- | -------- | ---------------- |
-| 传统 ML core | SVR + Ridge | 双通道派生特征（TOF / tau / 峰值 / 反射峰统计 + slow） | 42 | exp01/core |
-| 传统 ML core | PLS + Ridge | 同上 | 42 | exp01/core |
-| 传统 ML core | XGBoost + Ridge | 同上 | 42 | exp01/core |
-| DL 端到端 | MultimodalFusionV3 | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42 | exp02/v3_wf/ |
-| DL 慢通道基线 | LSTM (slow only) | slow[8] | 42 | exp02/lstm_slow/ |
-| DL 慢通道基线 | TCN (slow only) | slow[8] | 42 | exp02/tcn_slow/ |
-| DL 双波形基线 | WaveformOnlyDual (no slow) | ultrasonic[1000] + fiber_mic[2000] | 42 | exp02/wf_only/ |
+| 实验组           | 模型                            | 输入                                           | seed | 输出目录                         |
+| ------------- | ----------------------------- | -------------------------------------------- | ---- | ---------------------------- |
+| 传统 ML core   | SVR + Ridge                   | 双通道派生特征（TOF / tau / 峰值 / 反射峰统计 + slow）       | 42   | exp01/core                   |
+| 传统 ML core   | PLS + Ridge                   | 同上                                           | 42   | exp01/core                   |
+| 传统 ML core   | XGBoost + Ridge               | 同上                                           | 42   | exp01/core                   |
+| DL 慢通道基线     | GRU (slow only)               | slow[8]                                      | 42   | exp02/gru_slow/              |
+| DL 慢通道基线     | LSTM (slow only)              | slow[8]                                      | 42   | exp02/lstm_slow/             |
+| DL 慢通道基线     | TCN (slow only)               | slow[8]                                      | 42   | exp02/tcn_slow/              |
+| DL 慢通道基线     | Transformer (slow only)       | slow[8]                                      | 42   | exp02/transformer_slow/      |
+| DL 慢通道基线     | BranchFusion (slow only)      | slow[8]                                      | 42   | exp02/branch_fusion_slow/    |
+| DL 双波形基线     | MultimodalFusionV3 (no slow)  | ultrasonic[1000] + fiber_mic[2000]           | 42   | exp02/wf_only/              |
+| DL 全融合-CNN1D | CNN1D_Multimodal              | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42   | exp02/cnn1d_multimodal/     |
+| DL 全融合-GRU   | GRU_Multimodal                | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42   | exp02/gru_multimodal/       |
+| DL 全融合-LSTM  | LSTM_Multimodal               | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42   | exp02/lstm_multimodal/      |
+| DL 全融合-TCN   | TCN_Multimodal                | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42   | exp02/tcn_multimodal/       |
+| DL 全融合-Transformer | Transformer_Multimodal   | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42   | exp02/transformer_multimodal/ |
+| DL 全融合-CNN-LSTM | CNN-LSTM_Multimodal        | ultrasonic[1000] + fiber_mic[2000] + slow[8] | 42   | exp02/cnn_lstm_multimodal/  |
 
 补充说明：
 
@@ -75,13 +83,13 @@
 
 ### G2 模态与动态融合矩阵
 
-| 策略             | 实现                                                                             | 配置文件                               |
-| -------------- | ------------------------------------------------------------------------------ | ---------------------------------- |
-| Early fusion   | ultrasonic encoder + fiber_mic encoder → concat slow[8] → temporal head → head | configs/deep/fusion_early.yaml     |
-| Middle fusion  | 三支路各自编码后在 fusion layer 汇合                                                      | configs/deep/fusion_middle.yaml    |
-| Late fusion    | 波形分支与 slow 分支独立预测 → 学习权重加权                                                     | configs/deep/fusion_late.yaml      |
-| ML 模态对照 | `acoustic / optical / thermal` 四输出基学习器                                      | scripts + runtime combo-list       |
-| ML 融合对照 | `fused` 动态融合输出                                                               | scripts + runtime combo-list       |
+| 策略            | 实现                                                                             | 配置文件                            |
+| ------------- | ------------------------------------------------------------------------------ | ------------------------------- |
+| Early fusion  | ultrasonic encoder + fiber_mic encoder → concat slow[8] → temporal head → head | configs/deep/fusion_early.yaml  |
+| Middle fusion | 三支路各自编码后在 fusion layer 汇合                                                      | configs/deep/fusion_middle.yaml |
+| Late fusion   | 波形分支与 slow 分支独立预测 → 学习权重加权                                                     | configs/deep/fusion_late.yaml   |
+| ML 模态对照       | `acoustic / optical / thermal` 四输出基学习器                                         | scripts + runtime combo-list    |
+| ML 融合对照       | `fused` 动态融合输出                                                                 | scripts + runtime combo-list    |
 
 每种策略主线固定 seed=42，输出到 `exp03/`。
 
@@ -127,13 +135,13 @@
 
 ## 3. 公平对比约束（五同）
 
-| 约束       | 实现位置                                                                              |
-| -------- | --------------------------------------------------------------------------------- |
-| 同数据源     | `configs/paths.yaml` 锁定 `data/waveform_v3/` 的 `ultrasonic + fiber_mic + slow + y` |
-| 同划分      | `data/waveform_v3/splits/*.csv` 固定，按 `mixture_id` 分组，V3.1 生成 seed 为 `20260514`    |
-| 同标准化     | slow scaler 仅在 train 上拟合；两路 waveform 不单独存 scaler JSON，只做反量化与 train 统计归一化          |
-| 同随机基准    | 主线固定 seed=42；R1 复用已有 seed42，并补跑 [52, 62]                                      |
-| 同指标      | `src/pipeline/evaluate.py` 统一计算                                                   |
+| 约束    | 实现位置                                                                              |
+| ----- | --------------------------------------------------------------------------------- |
+| 同数据源  | `configs/paths.yaml` 锁定 `data/waveform_v3/` 的 `ultrasonic + fiber_mic + slow + y` |
+| 同划分   | `data/waveform_v3/splits/*.csv` 固定，按 `mixture_id` 分组，V3.1 生成 seed 为 `20260514`    |
+| 同标准化  | slow scaler 仅在 train 上拟合；两路 waveform 不单独存 scaler JSON，只做反量化与 train 统计归一化          |
+| 同随机基准 | 主线固定 seed=42；R1 复用已有 seed42，并补跑 [52, 62]                                          |
+| 同指标   | `src/pipeline/evaluate.py` 统一计算                                                   |
 
 ## 4. 验收标准
 
@@ -178,14 +186,14 @@
 
 ## 5. 控制与反馈机制
 
-| 机制            | 实现                                                                                                                      |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| 单一状态真源        | `outputs/STATUS.tsv` — 每实验每 seed 一行                                                                                     |
-| 状态字段          | `exp_id / model / seed / status / started / finished / macro_RMSE / notes`，status ∈ {running, success, failed, skipped} |
-| 状态汇总          | `python src/pipeline/status.py`                                                                                         |
+| 机制            | 实现                                                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 单一状态真源        | `outputs/STATUS.tsv` — 每实验每 seed 一行                                                                                        |
+| 状态字段          | `exp_id / model / seed / status / started / finished / macro_RMSE / notes`，status ∈ {running, success, failed, skipped}    |
+| 状态汇总          | `python src/pipeline/status.py`                                                                                            |
 | 单实验 stdout 格式 | `[exp_id.model.seedN] OK macro_RMSE=X.XXX took=Ys -> outputs/...` 或 `FAIL reason=... -> log path`；交互终端下训练入口可切换为单屏 CLI 进度界面 |
-| 结果统一表         | `outputs/summary/results.tsv` — 所有实验跑完 append                                                                           |
-| 拷贝代码版本锁       | 文件头加 `# Copied from <path> on <date>`，本地修改记 `docs/code_changelog.md`                                                    |
+| 结果统一表         | `outputs/summary/results.tsv` — 所有实验跑完 append                                                                              |
+| 拷贝代码版本锁       | 文件头加 `# Copied from <path> on <date>`，本地修改记 `docs/code_changelog.md`                                                       |
 
 ## 6. 关键风险与对策
 
@@ -217,6 +225,7 @@ src/dl/
 │   ├── __init__.py
 │   ├── acoustic_waveform_encoder.py
 │   ├── multimodal_fusion_v3.py     # 需要加 fiber_mic encoder 分支
+│   ├── multimodal_wrapper.py       # 通用波形融合包装器（6 个 backbone 变体）
 │   ├── registry.py
 │   ├── config_utils.py
 │   ├── lstm.py / tcn.py / gru.py / cnn1d.py
@@ -286,32 +295,38 @@ src/pipeline/
 
 训练速度优化路线、资源参数 smoke benchmark 与正式配置准入标准见 `docs/训练速度优化计划.md`；本设计文档只保留实验口径与验收矩阵。
 
-| Phase  | 任务                                           | 估时          |
-| ------ | -------------------------------------------- | ----------- |
-| P0 第二步 | 双通道仿真代码改造 + 数据生成 + 写 shim/feature_extraction | 2-3 天       |
-| P1     | 传统 ML 基线（core 4 组合 × seed42 + diagnostic）    | 1 天 + CPU |
-| P2     | DL 端到端基线（4 配置 × seed42）                      | 1 天 + GPU |
-| P3     | 模态与动态融合对比（3 个传统 combo × 4 类输出）              | 1 天 + CPU/GPU |
-| P4     | Track A 留一域（9 域 × 多模型）                       | 2-3 天 + GPU |
-| P5     | Track B 环境扰动                                 | 2-3 天 + GPU |
-| P6     | R1 多 seed 重复性检测（复用 seed42，补跑 52/62）      | 分批 CPU/GPU |
-| P7     | Track C 跨域微调（可选）                             | 1-2 天 + GPU |
-| P8     | 结果汇总 + 论文图                                   | 1 天         |
+| Phase  | 任务                                           | 估时            |
+| ------ | -------------------------------------------- | ------------- |
+| P0 第二步 | 双通道仿真代码改造 + 数据生成 + 写 shim/feature_extraction | 2-3 天         |
+| P1     | 传统 ML 基线（core 4 组合 × seed42 + diagnostic）    | 1 天 + CPU     |
+| P2     | DL 端到端基线（4 配置 × seed42）                      | 1 天 + GPU     |
+| P3     | 模态与动态融合对比（3 个传统 combo × 4 类输出）               | 1 天 + CPU/GPU |
+| P4     | Track A 留一域（9 域 × 多模型）                       | 2-3 天 + GPU   |
+| P5     | Track B 环境扰动                                 | 2-3 天 + GPU   |
+| P6     | R1 多 seed 重复性检测（复用 seed42，补跑 52/62）          | 分批 CPU/GPU    |
+| P7     | Track C 跨域微调（可选）                             | 1-2 天 + GPU   |
+| P8     | 结果汇总 + 论文图                                   | 1 天           |
 
 合计 9-14 天 + 多批 GPU 时长（Track C 可选不计）。
 
 ## 9. 论文图清单（P8 产出）
 
-| 图号  | 主题                         | 来源数据                           |
-| --- | -------------------------- | ------------------------------ |
-| F1  | ML vs DL 主对比（条形图）          | summary/results.tsv            |
-| F2  | per-component R² 雷达图       | summary/results.tsv            |
-| F3  | 模态与动态融合对比                 | summary/results.tsv（exp03 子集）  |
-| F4  | 留一域 domain_gap 热图          | summary/results.tsv（exp04 子集）  |
-| F5  | 环境扰动退化率曲线                  | summary/results.tsv（exp05 子集）  |
+| 图号  | 主题                         | 来源数据                                    |
+| --- | -------------------------- | --------------------------------------- |
+| F1  | ML vs DL 主对比（条形图）          | summary/results.tsv                     |
+| F2  | per-component R² 雷达图       | summary/results.tsv                     |
+| F3  | 模态与动态融合对比                  | summary/results.tsv（exp03 子集）           |
+| F4  | 留一域 domain_gap 热图          | summary/results.tsv（exp04 子集）           |
+| F5  | 环境扰动退化率曲线                  | summary/results.tsv（exp05 子集）           |
 | F6  | 多 seed 重复性误差棒              | summary/results_multiseed.tsv（exp06 子集） |
-| F7  | 跨域微调 sample efficiency（可选） | summary/results.tsv（exp07 子集）  |
+| F7  | 跨域微调 sample efficiency（可选） | summary/results.tsv（exp07 子集）           |
 
+## 10. 训练名单变更记录
 
+v0.5 变更：
 
-
+- 移除 CNN1D (纯慢变量)、CNN-LSTM (纯慢变量)、MultimodalFusionV3 (全融合+AMP) 三个条目
+- 新增 6 个 MultimodalWrapper 融合模型：CNN1D_Multimodal、GRU_Multimodal、LSTM_Multimodal、TCN_Multimodal、Transformer_Multimodal、CNN-LSTM_Multimodal
+- 保留 GRU/LSTM/TCN/Transformer/BranchFusion (纯慢变量) 和 MultimodalFusionV3 (纯多模态)
+- `fusion_formal.yaml` 配置文件保留，但不再属于 `run_all_training.ps1` 默认训练名单
+- 6 个融合模型统一 `batch_size: 8`，其余训练超参与对应 slow-only backbone 对齐

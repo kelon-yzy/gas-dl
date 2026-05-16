@@ -23,6 +23,8 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class TransformerRegressor(nn.Module):
+    input_format = "NTC"
+
     def __init__(self, config: dict | None = None, **kwargs):
         super().__init__()
         settings = merge_model_kwargs(

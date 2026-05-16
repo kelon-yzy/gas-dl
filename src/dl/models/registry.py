@@ -10,8 +10,17 @@ from models.gru import GRURegressor
 from models.lstm import LSTMRegressor
 from models.tcn import TCNRegressor
 from models.transformer_encoder import TransformerRegressor
+from models.multimodal_wrapper import (
+    build_cnn1d_multimodal,
+    build_gru_multimodal,
+    build_lstm_multimodal,
+    build_tcn_multimodal,
+    build_transformer_multimodal,
+    build_cnn_lstm_multimodal,
+)
 
 MODEL_REGISTRY = {
+    # 纯慢变量
     "cnn1d": CNN1DRegressor,
     "lstm": LSTMRegressor,
     "gru": GRURegressor,
@@ -20,6 +29,13 @@ MODEL_REGISTRY = {
     "transformer": TransformerRegressor,
     "branch_fusion": BranchFusionRegressor,
     "multimodal_fusion_v3": MultimodalFusionV3Regressor,
+    # 多模态变体（MultimodalWrapper + 各纯慢变量 backbone）
+    "cnn1d_multimodal": build_cnn1d_multimodal,
+    "gru_multimodal": build_gru_multimodal,
+    "lstm_multimodal": build_lstm_multimodal,
+    "tcn_multimodal": build_tcn_multimodal,
+    "transformer_multimodal": build_transformer_multimodal,
+    "cnn_lstm_multimodal": build_cnn_lstm_multimodal,
 }
 
 

@@ -28,6 +28,7 @@ from training.train import (
     train_config,
 )
 from training.early_stopping import EarlyStopping
+from models.registry import build_model
 
 
 # ── 合成数据集 ──
@@ -142,6 +143,19 @@ class CheckpointHelperTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _load_checkpoint(path, torch.device("cpu"))
 
+    def test_load_checkpoint_rejects_unsafe_legacy_pickle_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "legacy_rng_tuple.pt"
+            torch.save(
+                {
+                    "format_version": 1,
+                    "rng_state": {"numpy": np.random.get_state()},
+                },
+                path,
+            )
+            with self.assertRaises(ValueError):
+                _load_checkpoint(path, torch.device("cpu"))
+
     def test_restore_early_stopping(self):
         stopper = EarlyStopping(patience=10, mode="min")
         state = {"best": 0.05, "bad_epochs": 3, "patience": 20, "mode": "max"}
@@ -167,6 +181,46 @@ class CheckpointHelperTests(unittest.TestCase):
         config = {"model": {"name": "cnn1d"}}
         with self.assertRaises(ValueError):
             _validate_checkpoint_compat(ckpt, config)
+
+    def test_validate_checkpoint_compat_rejects_model_hyperparameter_mismatch(self):
+        ckpt = {
+            "format_version": 1,
+            "model_name": "cnn1d",
+            "epoch": 1,
+            "total_epochs": 2,
+            "model_state_dict": {},
+            "optimizer_state_dict": {},
+            "amp_scaler_state_dict": {},
+            "early_stopping": {},
+            "log_rows": [],
+            "rng_state": {},
+            "label_names": ["H2", "CH4", "CO2", "N2"],
+            "config": {
+                "data": {"dataset_type": "v2", "time_window": "all"},
+                "model": {
+                    "name": "cnn1d",
+                    "in_channels": 8,
+                    "out_dim": 4,
+                    "hidden_channels": [8, 16],
+                    "kernel_size": 3,
+                    "dropout": 0.0,
+                },
+            },
+        }
+        config = {
+            "data": {"dataset_type": "v2", "time_window": "all"},
+            "model": {
+                "name": "cnn1d",
+                "in_channels": 8,
+                "out_dim": 4,
+                "hidden_channels": [16, 32],
+                "kernel_size": 3,
+                "dropout": 0.0,
+            },
+        }
+
+        with self.assertRaises(ValueError):
+            _validate_checkpoint_compat(ckpt, config, ["H2", "CH4", "CO2", "N2"])
 
     def test_checkpoint_payload_structure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,6 +346,55 @@ class CheckpointIntegrationTests(unittest.TestCase):
                 summary = train_config(config)
                 self.assertEqual(summary["training_status"], "paused")
                 self.assertTrue((pathlib.Path(tmp) / "paused_checkpoint.pt").exists())
+
+    def test_fresh_interrupt_ignores_stale_last_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _minimal_config(tmp, epochs=5)
+            config["_cli_progress"] = None
+            config["_label_names"] = ["H2", "CH4", "CO2", "N2"]
+            out_dir = pathlib.Path(tmp)
+
+            stale_model = build_model(config["model"])
+            stale_state = {}
+            for key, value in stale_model.state_dict().items():
+                if value.is_floating_point():
+                    stale_state[key] = torch.full_like(value, 123.0)
+                else:
+                    stale_state[key] = torch.full_like(value, 123)
+            stale_model.load_state_dict(stale_state)
+            optimizer = torch.optim.Adam(stale_model.parameters(), lr=0.001)
+            scaler = torch.amp.GradScaler("cpu", enabled=False)
+            stopper = EarlyStopping(patience=5, mode="min")
+            _save_checkpoint(
+                out_dir / "last_checkpoint.pt",
+                _checkpoint_payload(
+                    stale_model,
+                    optimizer,
+                    scaler,
+                    stopper,
+                    epoch=99,
+                    total_epochs=99,
+                    log_rows=[{"epoch": 99}],
+                    best_path=out_dir / "best_model.pt",
+                    config_to_write={k: v for k, v in config.items() if not k.startswith("_")},
+                    status="completed",
+                    label_names=["H2", "CH4", "CO2", "N2"],
+                ),
+            )
+
+            def _interrupt_epoch(*args, **kwargs):
+                raise KeyboardInterrupt()
+
+            with mock.patch("training.train.build_datasets", side_effect=_build_synthetic_datasets), \
+                 mock.patch("training.train._load_label_names", return_value=["H2", "CH4", "CO2", "N2"]), \
+                 mock.patch("training.train._ensure_scaler_path"), \
+                 mock.patch("training.train._train_one_epoch", side_effect=_interrupt_epoch):
+                summary = train_config(config)
+
+            self.assertEqual(summary["training_status"], "paused")
+            paused = torch.load(out_dir / "paused_checkpoint.pt", map_location="cpu", weights_only=True)
+            first_tensor = next(iter(paused["model_state_dict"].values()))
+            self.assertFalse(torch.all(first_tensor == 123))
 
     def test_best_checkpoint_saved_on_improvement(self):
         with tempfile.TemporaryDirectory() as tmp:
