@@ -21,7 +21,7 @@ from patent_model.fault_labels import inject_faults
 from patent_model.modeling import ModelConfig, TraditionalFusionModel
 from patent_model.robustness import add_environment_noise, add_profile_environment_noise, select_pressure_slice
 from training.seed import set_seed
-from training.train import _ensure_scaler_path, _forward_batch
+from training.train import TrainEpochRequest, _ensure_scaler_path, _forward_batch, _train_one_epoch, evaluate_loss, evaluate_with_predictions
 
 
 def _dataset() -> PatentDataset:
@@ -166,6 +166,107 @@ class CodeReviewFixTests(unittest.TestCase):
 
         self.assertEqual(tuple(sample["slow"].shape), (2, 8))
         self.assertEqual(sample["meta"]["sample_id"], "Q1")
+
+    def test_evaluation_losses_use_sample_weighted_mean(self) -> None:
+        class IdentityModel(torch.nn.Module):
+            def forward(self, x):
+                return x
+
+        loader = [
+            (
+                torch.ones((3, 1), dtype=torch.float32),
+                torch.zeros((3, 1), dtype=torch.float32),
+                {"sample_id": ["S1", "S2", "S3"]},
+            ),
+            (
+                torch.full((1, 1), 3.0, dtype=torch.float32),
+                torch.zeros((1, 1), dtype=torch.float32),
+                {"sample_id": ["S4"]},
+            ),
+        ]
+        loss_fn = torch.nn.MSELoss()
+
+        eval_loss = evaluate_loss(IdentityModel(), loader, loss_fn, torch.device("cpu"))
+        pred_loss, bundle = evaluate_with_predictions(IdentityModel(), loader, loss_fn, torch.device("cpu"))
+
+        self.assertAlmostEqual(eval_loss, 3.0)
+        self.assertAlmostEqual(pred_loss, 3.0)
+        self.assertEqual(bundle.y_true.shape, (4, 1))
+        self.assertEqual(bundle.y_pred.shape, (4, 1))
+
+    def test_train_one_epoch_loss_uses_sample_weighted_mean(self) -> None:
+        model = torch.nn.Linear(1, 1, bias=False)
+        with torch.no_grad():
+            model.weight.fill_(1.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        loader = [
+            (
+                torch.ones((3, 1), dtype=torch.float32),
+                torch.zeros((3, 1), dtype=torch.float32),
+                {"sample_id": ["S1", "S2", "S3"]},
+            ),
+            (
+                torch.full((1, 1), 3.0, dtype=torch.float32),
+                torch.zeros((1, 1), dtype=torch.float32),
+                {"sample_id": ["S4"]},
+            ),
+        ]
+
+        train_loss = _train_one_epoch(
+            model=model,
+            loader=loader,
+            loss_fn=torch.nn.MSELoss(),
+            optimizer=optimizer,
+            device=torch.device("cpu"),
+            dataset=None,
+            env_aug_sigma=0.0,
+            amp_enabled=False,
+            scaler=None,
+            grad_clip_norm=0.0,
+        )
+
+        self.assertAlmostEqual(train_loss, 3.0)
+
+    def test_train_one_epoch_request_adapter_matches_legacy_kwargs(self) -> None:
+        model = torch.nn.Linear(1, 1, bias=False)
+        with torch.no_grad():
+            model.weight.fill_(1.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        loader = [
+            (
+                torch.ones((2, 1), dtype=torch.float32),
+                torch.zeros((2, 1), dtype=torch.float32),
+                {"sample_id": ["S1", "S2"]},
+            ),
+        ]
+        request = TrainEpochRequest(
+            model=model,
+            loader=loader,
+            loss_fn=torch.nn.MSELoss(),
+            optimizer=optimizer,
+            device=torch.device("cpu"),
+            dataset=None,
+            env_aug_sigma=0.0,
+            amp_enabled=False,
+            scaler=None,
+            grad_clip_norm=0.0,
+        )
+
+        request_loss = _train_one_epoch(request=request)
+        legacy_loss = _train_one_epoch(
+            model=model,
+            loader=loader,
+            loss_fn=torch.nn.MSELoss(),
+            optimizer=optimizer,
+            device=torch.device("cpu"),
+            dataset=None,
+            env_aug_sigma=0.0,
+            amp_enabled=False,
+            scaler=None,
+            grad_clip_norm=0.0,
+        )
+
+        self.assertAlmostEqual(request_loss, legacy_loss)
 
     def test_four_component_loader_reports_missing_condition_n2_column(self) -> None:
         tmp = tempfile.mkdtemp()

@@ -27,6 +27,12 @@ DEFAULT_ULTRASONIC_SAMPLES = 1000
 DEFAULT_FIBER_MIC_SAMPLES = 2000
 
 
+def _to_tensor_ready_array(array: np.ndarray, dtype) -> np.ndarray:
+    if array.dtype != dtype or not array.flags.c_contiguous or not array.flags.writeable:
+        return np.array(array, dtype=dtype, copy=True)
+    return array
+
+
 def _load_waveform_sequence_ids(path: str | Path) -> list[str]:
     path = Path(path)
     if path.is_file():
@@ -210,13 +216,12 @@ class WaveformSequenceDataset(Dataset):
         if self.ultrasonic is not None:
             return
         data = self._preloaded_data if self._preloaded_data is not None else load_waveform_package(self.npz_path)
-        # 将 mmap 或只读数据转为可写连续 ndarray，消除 __getitem__ 中逐样本 copy 的开销
-        self.ultrasonic = np.array(data["ultrasonic"], dtype=np.int16, copy=True)
-        self.ultrasonic_scale = np.array(data["ultrasonic_scale"], dtype=np.float32, copy=True)
-        self.fiber_mic = np.array(data["fiber_mic"], dtype=np.int16, copy=True)
-        self.fiber_mic_scale = np.array(data["fiber_mic_scale"], dtype=np.float32, copy=True)
-        self.slow = np.array(data["slow"], dtype=np.float32, copy=True)
-        self.y = np.array(data["y"], dtype=np.float32, copy=True)
+        self.ultrasonic = data["ultrasonic"].astype(np.int16, copy=False)
+        self.ultrasonic_scale = data["ultrasonic_scale"].astype(np.float32, copy=False)
+        self.fiber_mic = data["fiber_mic"].astype(np.int16, copy=False)
+        self.fiber_mic_scale = data["fiber_mic_scale"].astype(np.float32, copy=False)
+        self.slow = data["slow"].astype(np.float32, copy=False)
+        self.y = data["y"].astype(np.float32, copy=False)
         self.metadata = load_sequence_metadata(self.index_path, self.sequence_ids)
 
     def __getstate__(self):
@@ -249,6 +254,14 @@ class WaveformSequenceDataset(Dataset):
             slow = slow[self.time_indices, :]
         if self.slow_scaler is not None:
             slow = self.slow_scaler.transform(slow)
+
+        # memmap / 只读视图在 worker 内按样本转成可写连续数组，避免整包复制 7GB+ 波形数据
+        ultrasonic = _to_tensor_ready_array(ultrasonic, np.int16)
+        ultrasonic_scale = _to_tensor_ready_array(ultrasonic_scale, np.float32)
+        fiber_mic = _to_tensor_ready_array(fiber_mic, np.int16)
+        fiber_mic_scale = _to_tensor_ready_array(fiber_mic_scale, np.float32)
+        slow = _to_tensor_ready_array(slow, np.float32)
+        target = _to_tensor_ready_array(target, np.float32)
 
         meta = self.metadata.iloc[source_idx].to_dict()
         meta["sample_id"] = self.sequence_ids[source_idx]

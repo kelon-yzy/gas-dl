@@ -18,6 +18,8 @@ sys.path.insert(0, str(ROOT / "src" / "dl"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from training.train import (
+    CheckpointBuildContext,
+    TrainRunOptions,
     _capture_rng_state,
     _restore_rng_state,
     _checkpoint_payload,
@@ -249,6 +251,59 @@ class CheckpointHelperTests(unittest.TestCase):
             self.assertIn("rng_state", payload)
             self.assertEqual(payload["model_name"], "linear")
 
+    def test_checkpoint_payload_context_matches_legacy_kwargs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = pathlib.Path(tmp)
+            best_path = out_dir / "best_model.pt"
+            model = torch.nn.Linear(8, 4)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            scaler = torch.amp.GradScaler("cpu", enabled=False)
+            stopper = EarlyStopping(patience=5, mode="min")
+            config = {"model": {"name": "linear"}}
+            log_rows = [{"epoch": 1, "train_loss": 0.5}]
+
+            legacy_payload = _checkpoint_payload(
+                model,
+                optimizer,
+                scaler,
+                stopper,
+                epoch=3,
+                total_epochs=10,
+                log_rows=log_rows,
+                best_path=best_path,
+                config_to_write=config,
+                status="running",
+                label_names=["H2", "CH4", "CO2", "N2"],
+                scheduler=None,
+            )
+            context_payload = _checkpoint_payload(
+                context=CheckpointBuildContext(
+                    model=model,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    stopper=stopper,
+                    epoch=3,
+                    total_epochs=10,
+                    log_rows=log_rows,
+                    best_path=best_path,
+                    config_to_write=config,
+                    status="running",
+                    label_names=["H2", "CH4", "CO2", "N2"],
+                    scheduler=None,
+                )
+            )
+
+            self.assertEqual(legacy_payload["format_version"], context_payload["format_version"])
+            self.assertEqual(legacy_payload["status"], context_payload["status"])
+            self.assertEqual(legacy_payload["epoch"], context_payload["epoch"])
+            self.assertEqual(legacy_payload["total_epochs"], context_payload["total_epochs"])
+            self.assertEqual(legacy_payload["config"], context_payload["config"])
+            self.assertEqual(legacy_payload["model_name"], context_payload["model_name"])
+            self.assertEqual(legacy_payload["label_names"], context_payload["label_names"])
+            self.assertEqual(legacy_payload["log_rows"], context_payload["log_rows"])
+            self.assertEqual(legacy_payload["best_model_path"], context_payload["best_model_path"])
+            self.assertEqual(legacy_payload["early_stopping"], context_payload["early_stopping"])
+
 
 class CheckpointIntegrationTests(unittest.TestCase):
     """训练流程集成测试 —— 用合成数据和轻量模型跑完整流程"""
@@ -420,6 +475,26 @@ class CheckpointIntegrationTests(unittest.TestCase):
             # epoch 1 和 3 不应该生成快照
             self.assertFalse((pathlib.Path(tmp) / "epoch_0001.pt").exists())
             self.assertFalse((pathlib.Path(tmp) / "epoch_0003.pt").exists())
+
+    def test_train_config_accepts_options_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _minimal_config(tmp, epochs=3)
+            config["_cli_progress"] = None
+            config["_label_names"] = ["H2", "CH4", "CO2", "N2"]
+
+            with mock.patch("training.train.build_datasets", side_effect=_build_synthetic_datasets), \
+                 mock.patch("training.train._load_label_names", return_value=["H2", "CH4", "CO2", "N2"]), \
+                 mock.patch("training.train._ensure_scaler_path"):
+                summary = train_config(
+                    config,
+                    options=TrainRunOptions(
+                        epochs_override=1,
+                        stop_after_epoch=1,
+                    ),
+                )
+
+            self.assertEqual(summary["training_status"], "paused")
+            self.assertEqual(summary["epochs_trained"], 1)
 
 
 class PipelineArgTests(unittest.TestCase):

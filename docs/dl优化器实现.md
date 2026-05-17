@@ -5,11 +5,11 @@
 
 ## 1. 变更总览
 
-| 文件 | 变更类型 | 说明 |
-|------|---------|------|
-| `src/dl/training/train.py` | 修改 | 增加 AdamW 支持、学习率调度器、梯度裁剪、checkpoint 恢复调度器 |
-| `configs/deep/slow_only_cnn1d_multimodal_formal.yaml` | 修改 | optimizer=adamw, weight_decay=0.01, 新增 lr_scheduler 和 grad_clip_norm |
-| `tests/test_deep_checkpoint_resume.py` | 修改 | 增加 scheduler 恢复的测试用例 |
+| 文件                                                    | 变更类型 | 说明                                                                   |
+| ----------------------------------------------------- | ---- | -------------------------------------------------------------------- |
+| `src/dl/training/train.py`                            | 修改   | 增加 AdamW 支持、学习率调度器、梯度裁剪、checkpoint 恢复调度器                             |
+| `configs/deep/slow_only_cnn1d_multimodal_formal.yaml` | 修改   | optimizer=adamw, weight_decay=0.01, 新增 lr_scheduler 和 grad_clip_norm |
+| `tests/test_deep_checkpoint_resume.py`                | 修改   | 增加 scheduler 恢复的测试用例                                                 |
 
 ## 2. 代码改动详述
 
@@ -18,6 +18,7 @@
 **位置**：`train_config()` 函数内，`model = build_model(...)` 之后。
 
 **修改前**：
+
 ```python
 optimizer = torch.optim.Adam(
     model.parameters(),
@@ -27,6 +28,7 @@ optimizer = torch.optim.Adam(
 ```
 
 **修改后**：
+
 ```python
 lr = float(config["training"].get("learning_rate", 1e-3))
 wd = float(config["training"].get("weight_decay", 0.01))
@@ -38,6 +40,7 @@ else:
 ```
 
 **要点**：
+
 - `optimizer` 配置键默认为 `"adam"`，向后兼容——所有现有配置没有此键时走 Adam 分支
 - `weight_decay` 默认值从 `0.0` 改为 `0.01`——但这只影响新配置显式覆盖的场景，现有配置多数已写明 `weight_decay: 0.0001`
 
@@ -46,6 +49,7 @@ else:
 **位置**：`stopper = EarlyStopping(...)` 之后、`total_epochs = ...` 之后。
 
 **新增代码**：
+
 ```python
 total_epochs = int(config["training"].get("epochs", 200))
 grad_clip_norm = float(config["training"].get("grad_clip_norm", 0.0))
@@ -92,6 +96,7 @@ if scheduler_cfg is not None:
 ```
 
 **要点**：
+
 - `lr_scheduler` 配置键不存在时 `scheduler = None`，等价于恒定 LR——完全向后兼容
 - 支持 4 种调度策略：`cosine_warmup`（新增推荐）、`cosine`、`multistep`、`plateau`
 - `eta_min` 默认为 `lr * 0.1`（即 0.001 → 0.0001），与 LLaMA 实践一致
@@ -101,6 +106,7 @@ if scheduler_cfg is not None:
 **位置**：`_train_one_epoch()` 函数签名增加 `grad_clip_norm` 参数。
 
 **修改前**：
+
 ```python
 def _train_one_epoch(
     model, loader, loss_fn, optimizer, device, dataset,
@@ -110,6 +116,7 @@ def _train_one_epoch(
 ```
 
 **修改后**：
+
 ```python
 def _train_one_epoch(
     model, loader, loss_fn, optimizer, device, dataset,
@@ -122,6 +129,7 @@ def _train_one_epoch(
 **位置**：`loss.backward()` 之后、`optimizer.step()` 之前插入：
 
 **AMP 分支**（`if amp_enabled`）：
+
 ```python
 if amp_enabled:
     scaler.scale(loss).backward()
@@ -133,6 +141,7 @@ if amp_enabled:
 ```
 
 **非 AMP 分支**（`else`）：
+
 ```python
 else:
     loss.backward()
@@ -142,6 +151,7 @@ else:
 ```
 
 **调用处**（训练循环中）：
+
 ```python
 train_loss = _train_one_epoch(
     model, loaders["train"], loss_fn, optimizer, device, datasets["train"],
@@ -166,6 +176,7 @@ if scheduler is not None:
 ```
 
 **要点**：
+
 - `ReduceLROnPlateau` 需要 `val_loss` 或 `macro_RMSE` 作为参数，其他调度器不需要
 - scheduler.step() 必须在 optimizer.step() 之后调用（每个 epoch 一次）
 
@@ -174,6 +185,7 @@ if scheduler is not None:
 **`_checkpoint_payload` 增加 `scheduler_state_dict` 键**：
 
 在现有 `"amp_scaler_state_dict": scaler.state_dict()` 之后增加：
+
 ```python
 "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
 ```
@@ -181,6 +193,7 @@ if scheduler is not None:
 **`_load_checkpoint` 恢复调度器**：
 
 在 `_restore_early_stopping` 调用之后增加：
+
 ```python
 scheduler_state = ckpt.get("scheduler_state_dict")
 if scheduler_state is not None and scheduler is not None:
@@ -190,6 +203,7 @@ if scheduler_state is not None and scheduler is not None:
 **`_validate_checkpoint_compat` 增加调度器兼容检查**：
 
 在现有 `model_keys` 循环之后增加：
+
 ```python
 # 调度器类型变更不阻塞恢复，但记录差异
 ckpt_scheduler_type = ckpt_config.get("training", {}).get("lr_scheduler", {}).get("type")
@@ -201,9 +215,11 @@ if ckpt_scheduler_type != cur_scheduler_type:
 ### 2.6 `_train_one_epoch` 函数签名变更的影响
 
 `_train_one_epoch` 在以下位置被调用：
+
 1. `train_config()` 主训练循环 — **需更新调用处**
 
 检查其他调用点：
+
 - 不存在其他调用处（`evaluate_with_predictions` 和 `predict` 不调用 `_train_one_epoch`）
 
 ## 3. 配置变更
@@ -253,22 +269,22 @@ training:
 
 **变更对比**：
 
-| 键 | 旧值 | 新值 | 理由 |
-|----|------|------|------|
-| `optimizer` | （无，默认 adam） | `adamw` | 解耦 weight decay |
-| `weight_decay` | `0.0001` | `0.01` | AdamW 标准值（ICLR 2025 Wang et al.） |
-| `grad_clip_norm` | （无，默认 0） | `1.0` | 防止 val_loss 极端值 18.78 |
-| `lr_scheduler.type` | （无） | `cosine_warmup` | d2l 11.11 + LLaMA 实践 |
-| `lr_scheduler.warmup_epochs` | （无） | `5` | 200 epoch × 2.5% = 5 epoch |
-| `lr_scheduler.eta_min` | （无） | `0.0001` | η_max/10 = 0.001/10 |
+| 键                            | 旧值          | 新值              | 理由                               |
+| ---------------------------- | ----------- | --------------- | -------------------------------- |
+| `optimizer`                  | （无，默认 adam） | `adamw`         | 解耦 weight decay                  |
+| `weight_decay`               | `0.0001`    | `0.01`          | AdamW 标准值（ICLR 2025 Wang et al.） |
+| `grad_clip_norm`             | （无，默认 0）    | `1.0`           | 防止 val_loss 极端值 18.78            |
+| `lr_scheduler.type`          | （无）         | `cosine_warmup` | d2l 11.11 + LLaMA 实践             |
+| `lr_scheduler.warmup_epochs` | （无）         | `5`             | 200 epoch × 2.5% = 5 epoch       |
+| `lr_scheduler.eta_min`       | （无）         | `0.0001`        | η_max/10 = 0.001/10              |
 
 ## 4. 向后兼容性
 
-| 场景 | 行为 |
-|------|------|
+| 场景                                                   | 行为                                                                                                    |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | 旧配置（无 `optimizer`、`lr_scheduler`、`grad_clip_norm` 键） | `optimizer` 默认 `"adam"` → Adam；`scheduler = None` → 恒定 LR；`grad_clip_norm = 0.0` → 不裁剪。**行为与改动前完全一致** |
-| 旧 checkpoint 恢复 | `scheduler_state_dict` 不存在时跳过恢复，不影响 Adam 恢复 |
-| 旧测试 | `test_deep_checkpoint_resume.py` 中的恢复测试不需要修改（scheduler_state_dict 为 None 时不恢复） |
+| 旧 checkpoint 恢复                                      | `scheduler_state_dict` 不存在时跳过恢复，不影响 Adam 恢复                                                           |
+| 旧测试                                                  | `test_deep_checkpoint_resume.py` 中的恢复测试不需要修改（scheduler_state_dict 为 None 时不恢复）                        |
 
 ## 5. 测试计划
 
@@ -327,20 +343,22 @@ python src/pipeline/train_deep.py --config configs/deep/slow_only_cnn1d_multimod
 
 ### 6.2 对比指标
 
-| 指标 | 旧模型 (Adam, 恒定 lr) | 目标 (AdamW, warmup+cosine) |
-|------|----------------------|--------------------------|
-| macro_RMSE | 1.163 | ≤ 0.85 |
-| 训练曲线形态 | 震荡、极端值 val_loss=18.78 | 平滑收敛 |
-| 有效 epoch | 38 (best) / 63 (stop) | 80-150 |
-| val_loss 极端值 | 18.78 | < 5.0 |
+| 指标           | 旧模型 (Adam, 恒定 lr)     | 目标 (AdamW, warmup+cosine) |
+| ------------ | --------------------- | ------------------------- |
+| macro_RMSE   | 1.163                 | ≤ 0.85                    |
+| 训练曲线形态       | 震荡、极端值 val_loss=18.78 | 平滑收敛                      |
+| 有效 epoch     | 38 (best) / 63 (stop) | 80-150                    |
+| val_loss 极端值 | 18.78                 | < 5.0                     |
 
 ### 6.3 推广决策
 
 若 RMSE 降到 0.70-0.85 范围且训练曲线平稳：
+
 - 将 `optimizer: adamw`、`grad_clip_norm: 1.0`、`lr_scheduler` 配置推广到其余 5 个 multimodal 配置
 - 保留各 backbone 的超参差异（hidden_size、kernel_size 等），只统一优化策略
 
 若 RMSE 改善不明显（>0.90）：
+
 - 检查数据加载是否成为瓶颈（P0 num_workers=2 是否生效）
 - 尝试增大 warmup_epochs 到 10（5% 总 steps）
 - 尝试 eta_min=1e-6（更激进的衰减）

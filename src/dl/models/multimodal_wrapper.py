@@ -135,6 +135,9 @@ def _build_multimodal(
     for key in list(kwargs.keys()):
         if key in allowed and key != input_param:
             backbone_kwargs[key] = kwargs.pop(key)
+    if kwargs:
+        unknown = ", ".join(sorted(kwargs.keys()))
+        raise ValueError(f"{backbone_name} / MultimodalWrapper 存在未知配置项: {unknown}")
 
     backbone = backbone_class(**backbone_kwargs)
     return MultimodalWrapper(

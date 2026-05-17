@@ -160,6 +160,19 @@ class MultimodalWrapperModelTests(unittest.TestCase):
         # fused_dim = 8 + 64*1 = 72
         self.assertEqual(model.backbone.encoder[0].in_channels, 72)
 
+    def test_unknown_wrapper_or_backbone_kwargs_raise_value_error(self):
+        """未知配置项不能被静默忽略，否则实验配置会悄悄退回默认值。"""
+        with self.assertRaisesRegex(ValueError, "dropouut"):
+            build_model(
+                {
+                    "name": "cnn1d_multimodal",
+                    "slow_dim": 8,
+                    "hidden_channels": [32, 64, 64],
+                    "out_dim": 4,
+                    "dropouut": 0.1,
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
