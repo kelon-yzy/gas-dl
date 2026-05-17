@@ -7,7 +7,7 @@
 │                        cnn1d_multimodal                                 │
 │  = MultimodalWrapper(backbone=CNN1DRegressor)                          │
 │                                                                         │
-│  输入 (5 个张量)                                                        │
+│  输入 (6 个张量)                                                        │
 │  ┌────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────────────┐  │
 │  │ultrasonic  │  │ultrasonic    │  │fiber_mic   │  │fiber_mic       │  │
 │  │int16       │  │_scale       │  │int16       │  │_scale          │  │
@@ -24,12 +24,15 @@
 │              │     ┌─────────────┐           │                         │
 │              │     │slow (B,T,8) │           │                         │
 │              │     └──────┬──────┘           │                         │
+│              │     ┌────────────────────┐    │                         │
+│              │     │stage_one_hot(B,T,4)│    │                         │
+│              │     └──────────┬─────────┘    │                         │
 │              ▼            ▼                  ▼                        │
-│         torch.cat([u_emb, f_emb, slow], dim=-1)                       │
-│                    fused: (B, T, 136)                                  │
+│         torch.cat([u_emb, f_emb, slow, stage_one_hot], dim=-1)        │
+│                    fused: (B, T, 140)                                  │
 │                         │                                              │
 │                    transpose(1,2)                                      │
-│                    (B, 136, T)  ← NCT 格式                            │
+│                    (B, 140, T)  ← NCT 格式                            │
 │                         │                                              │
 │                         ▼                                              │
 │              ┌──────────────────────┐                                   │
@@ -48,6 +51,7 @@
 | 磁盘                           | fiber_mic  | (N, T, 2000)                         | int16   | memmap 懒加载       |
 | 磁盘                           | slow       | (N, T, 8)                            | float32 | 8 个慢变量通道         |
 | 磁盘                           | y          | (N, 4)                               | float32 | H2/CH4/CO2/N2 浓度 |
+| Dataset.__getitem__          | stage_one_hot | (T, 4)                            | float32 | 在线生成，不写入数据包 |
 | Dataset.__getitem__          | ultrasonic | (T, 1000)                            | int16   |                  |
 | DataLoader batch             | ultrasonic | (B, T, 1000)                         | int16   |                  |
 | **AcousticWaveformEncoder**  |            |                                      |         |                  |
@@ -66,10 +70,10 @@
 | Linear(128→64)+LN+Dropout    |            | (B\*T, 64)                           |         | 投影头              |
 | reshape                      | embedding  | (B, T, 64)                           |         |                  |
 | **MultimodalWrapper**        |            |                                      |         |                  |
-| cat([u_emb, f_emb, slow])    | fused      | (B, T, 136)                          |         | 64+64+8          |
-| transpose                    | fused      | (B, 136, T)                          |         | NCT 格式           |
+| cat([u_emb, f_emb, slow, stage_one_hot]) | fused | (B, T, 140)               |         | 64+64+8+4        |
+| transpose                    | fused      | (B, 140, T)                          |         | NCT 格式           |
 | **CNN1DRegressor**           |            |                                      |         |                  |
-| Conv1d(136→32,k5,p2)         |            | (B, 32, T)                           |         |                  |
+| Conv1d(140→32,k5,p2)         |            | (B, 32, T)                           |         |                  |
 | BN(32)+ReLU+Dropout          |            | (B, 32, T)                           |         |                  |
 | Conv1d(32→64,k5,p2)          |            | (B, 64, T)                           |         |                  |
 | BN(64)+ReLU+Dropout          |            | (B, 64, T)                           |         |                  |
@@ -90,11 +94,11 @@ YAML配置 → build_model({"name": "cnn1d_multimodal", ...})
 
 `_build_multimodal` 内部：
 
-1. 提取 wrapper 参数: `slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64`
-2. 计算 `fused_dim = 8 + 64*2 = 136`
+1. 提取 wrapper 参数: `slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64, use_stage_one_hot=True, stage_dim=4`
+2. 计算 `fused_dim = 8 + 64*2 + 4 = 140`
 3. 只传白名单参数给 backbone:
-   `CNN1DRegressor(in_channels=136, hidden_channels=[32,64,64], kernel_size=5, dropout=0.1, out_dim=4)`
-4. 构造 `MultimodalWrapper(backbone, slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64)`
+   `CNN1DRegressor(in_channels=140, hidden_channels=[32,64,64], kernel_size=5, dropout=0.1, out_dim=4)`
+4. 构造 `MultimodalWrapper(backbone, slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64, use_stage_one_hot=True, stage_dim=4)`
 
 ## 4. 三个核心模块细节
 
@@ -116,10 +120,17 @@ Linear(128→64) → LayerNorm(64) → Dropout(0.1)     输出: 64维
 ### MultimodalWrapper（融合包装器）
 
 - 持有 2 个 AcousticWaveformEncoder（可独立开关）
-- 拼接：`cat([ultrasonic_emb, fiber_mic_emb, slow], dim=-1)` → (B, T, 136)
+- 持有可选阶段 one-hot 分支：`stage_one_hot ∈ R^(B,T,4)`，语义为
+  - `baseline = [1,0,0,0]`
+  - `exposure = [0,1,0,0]`
+  - `steady = [0,0,1,0]`
+  - `recovery = [0,0,0,1]`
+- 阶段编码由 `WaveformSequenceDataset` 按 `phase_boundaries()` 在线生成，不依赖新数据包
+- 拼接：`cat([ultrasonic_emb, fiber_mic_emb, slow, stage_one_hot], dim=-1)` → (B, T, 140)
 - 按 backbone 的 input_format 转置：
-  - NCT（CNN1D/TCN/CNN-LSTM）：`transpose(1,2)` → (B, 136, T)
-  - NTC（GRU/LSTM/Transformer）：保持 (B, T, 136)
+  - NCT（CNN1D/TCN/CNN-LSTM）：`transpose(1,2)` → (B, 140, T)
+  - NTC（GRU/LSTM/Transformer）：保持 (B, T, 140)
+- `use_stage_one_hot=False` 时退回旧行为，不影响其他多模态模型
 
 ### CNN1DRegressor（backbone）
 
@@ -142,6 +153,8 @@ Linear(128→64) → LayerNorm(64) → Dropout(0.1)     输出: 64维
 model:
   name: cnn1d_multimodal
   slow_dim: 8
+  use_stage_one_hot: true
+  stage_dim: 4
   hidden_channels: [32, 64, 64]
   kernel_size: 5
   dropout: 0.1
@@ -162,5 +175,7 @@ training:
 
 - `waveform_embedding_dim` 锁定为 64（encoder 内强制校验）
 - `slow_dim` 锁定为 8（V3 方案）
+- `stage_dim` 锁定为 4（baseline / exposure / steady / recovery）
 - `out_dim = 4`（H2/CH4/CO2/N2 四组分浓度）
-- 旧 checkpoint 不兼容新架构（state_dict key 结构变化）
+- `use_stage_one_hot=true` 时，CNN1D 的 `in_channels` 从 136 变为 140
+- 旧 checkpoint 不兼容新架构（输入维度与 state_dict 结构变化）

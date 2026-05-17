@@ -14,6 +14,7 @@ from training.checkpoints import (
     _restore_rng_state,
     _save_checkpoint,
     _validate_checkpoint_compat,
+    _validate_model_architecture_compat,
 )
 from training.orchestrator import (
     TrainDependencies,

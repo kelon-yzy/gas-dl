@@ -27,6 +27,7 @@ from training.train import (
     _load_checkpoint,
     _restore_early_stopping,
     _validate_checkpoint_compat,
+    _validate_model_architecture_compat,
     train_config,
 )
 from training.early_stopping import EarlyStopping
@@ -223,6 +224,34 @@ class CheckpointHelperTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _validate_checkpoint_compat(ckpt, config, ["H2", "CH4", "CO2", "N2"])
+
+    def test_validate_model_architecture_compat_passes_on_matching_keys(self):
+        """当 checkpoint state_dict 键与当前模型完全匹配时，不应报错。"""
+        model = torch.nn.Linear(8, 4)
+        ckpt = {
+            "model_name": "linear",
+            "model_state_dict": model.state_dict(),
+        }
+        _validate_model_architecture_compat(ckpt, set(model.state_dict().keys()))
+
+    def test_validate_model_architecture_compat_rejects_missing_and_extra_keys(self):
+        """架构变更后 checkpoint 缺少键或有额外键时必须报错，并给出明确差异信息。"""
+        model = torch.nn.Linear(8, 4)
+        model_keys = set(model.state_dict().keys())
+        # 模拟架构升级：旧 checkpoint 缺少 projection.weight 等，多出 features.0.weight 等
+        old_state = {"features.0.weight": torch.randn(16, 1, 15), "features.0.bias": torch.randn(16)}
+        ckpt_missing = {"model_name": "cnn1d_multimodal", "model_state_dict": old_state}
+        with self.assertRaises(ValueError) as cm:
+            _validate_model_architecture_compat(ckpt_missing, model_keys)
+        error_msg = str(cm.exception)
+        self.assertIn("checkpoint 独有", error_msg)
+        self.assertIn("当前模型独有", error_msg)
+        self.assertIn("架构已变更", error_msg)
+
+    def test_validate_model_architecture_compat_skips_when_no_state_dict(self):
+        """checkpoint 缺少 model_state_dict 时跳过架构校验（不应报错）。"""
+        ckpt = {"model_name": "cnn1d"}
+        _validate_model_architecture_compat(ckpt, {"weight", "bias"})
 
     def test_checkpoint_payload_structure(self):
         with tempfile.TemporaryDirectory() as tmp:

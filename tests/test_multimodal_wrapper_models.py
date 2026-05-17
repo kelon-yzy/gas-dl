@@ -28,6 +28,7 @@ class MultimodalWrapperModelTests(unittest.TestCase):
             "fiber_mic": torch.randint(0, 32768, (B, T, fiber_mic_len), dtype=torch.int16),
             "fiber_mic_scale": torch.rand(B, T),
             "slow": torch.randn(B, T, slow_dim),
+            "stage_one_hot": torch.nn.functional.one_hot(torch.arange(T).repeat(B, 1) % 4, num_classes=4).to(torch.float32),
         }
 
     def _forward_model(self, model_name: str, batch: dict) -> torch.Tensor:
@@ -60,6 +61,7 @@ class MultimodalWrapperModelTests(unittest.TestCase):
                 batch["fiber_mic"],
                 batch["fiber_mic_scale"],
                 batch["slow"],
+                stage_one_hot=batch.get("stage_one_hot"),
             )
 
     def test_cnn1d_multimodal_output_shape(self):
@@ -160,6 +162,42 @@ class MultimodalWrapperModelTests(unittest.TestCase):
         # fused_dim = 8 + 64*1 = 72
         self.assertEqual(model.backbone.encoder[0].in_channels, 72)
 
+    def test_fused_dim_includes_stage_one_hot_when_enabled(self):
+        """开启阶段 one-hot 后 fused_dim 额外增加 4。"""
+        model = _build_multimodal(
+            CNN1DRegressor,
+            slow_dim=8,
+            hidden_channels=[32, 64],
+            out_dim=4,
+            use_stage_one_hot=True,
+            stage_dim=4,
+        )
+        self.assertEqual(model.backbone.encoder[0].in_channels, 140)
+
+    def test_cnn1d_multimodal_accepts_stage_one_hot(self):
+        """cnn1d_multimodal 开启阶段 one-hot 后可正常前向。"""
+        cfg = {
+            "name": "cnn1d_multimodal",
+            "slow_dim": 8,
+            "hidden_channels": [32, 64, 64],
+            "out_dim": 4,
+            "use_stage_one_hot": True,
+            "stage_dim": 4,
+        }
+        model = build_model(cfg)
+        model.eval()
+        batch = self._make_batch()
+        with torch.no_grad():
+            out = model(
+                batch["ultrasonic"],
+                batch["ultrasonic_scale"],
+                batch["fiber_mic"],
+                batch["fiber_mic_scale"],
+                batch["slow"],
+                stage_one_hot=batch["stage_one_hot"],
+            )
+        self.assertEqual(out.shape, (4, 4))
+
     def test_unknown_wrapper_or_backbone_kwargs_raise_value_error(self):
         """未知配置项不能被静默忽略，否则实验配置会悄悄退回默认值。"""
         with self.assertRaisesRegex(ValueError, "dropouut"):
@@ -172,6 +210,38 @@ class MultimodalWrapperModelTests(unittest.TestCase):
                     "dropouut": 0.1,
                 }
             )
+
+    def test_waveform_dropout_propagated_to_encoder(self):
+        """waveform_dropout 应传入 AcousticWaveformEncoder，控制编码器 Dropout 概率。"""
+        cfg_dropout = {"name": "gru_multimodal", "slow_dim": 8, "hidden_size": 64, "out_dim": 4, "waveform_dropout": 0.5}
+        model = build_model(cfg_dropout)
+        u_enc = model.ultrasonic_encoder
+        f_enc = model.fiber_mic_encoder
+        self.assertIsNotNone(u_enc)
+        self.assertIsNotNone(f_enc)
+        # 编码器 projection 层包含 Dropout，检查概率值
+        for name, module in u_enc.named_modules():
+            if isinstance(module, torch.nn.Dropout):
+                self.assertEqual(module.p, 0.5, f"ultrasonic_encoder {name} 期望 dropout=0.5，实际 {module.p}")
+        for name, module in f_enc.named_modules():
+            if isinstance(module, torch.nn.Dropout):
+                self.assertEqual(module.p, 0.5, f"fiber_mic_encoder {name} 期望 dropout=0.5，实际 {module.p}")
+
+    def test_waveform_dropout_default_is_0pt1(self):
+        """不指定 waveform_dropout 时默认为 0.1（与 AcousticWaveformEncoder 默认值一致）。"""
+        model = build_model({"name": "gru_multimodal", "slow_dim": 8, "hidden_size": 64, "out_dim": 4})
+        u_enc = model.ultrasonic_encoder
+        for name, module in u_enc.named_modules():
+            if isinstance(module, torch.nn.Dropout):
+                self.assertAlmostEqual(module.p, 0.1, places=4)
+
+    def test_waveform_dropout_zero_disables_encoder_dropout(self):
+        """waveform_dropout=0.0 时编码器不应有 Dropout 效果。"""
+        cfg = {"name": "gru_multimodal", "slow_dim": 8, "hidden_size": 64, "out_dim": 4, "waveform_dropout": 0.0}
+        model = build_model(cfg)
+        for name, module in model.ultrasonic_encoder.named_modules():
+            if isinstance(module, torch.nn.Dropout):
+                self.assertEqual(module.p, 0.0, f"期望 dropout=0.0，实际 {module.p}")
 
 
 if __name__ == "__main__":

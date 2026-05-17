@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/waveform_v3/
+data/waveform_v3_seedpath_formal/
+data/waveform_v3_smoke_seedpath/
 
 # Experiment data and model artifacts
 outputs/

@@ -26,6 +26,9 @@ from scripts.acoustic_v2 import _hidden_sound_speed_v2
 from scripts.generate_v1_dataset import PROCESSING_PARAMS, _generate_main_features
 from sim_common import (
     FOUR_COMPONENT_LABEL_FIELDS,
+    MULTI_PATH_PHASE_BASELINE,
+    MULTI_PATH_PHASE_OFF,
+    MULTI_PATH_PHASE_STEADY,
     build_common_summary,
     build_index_rows,
     build_label_rows,
@@ -37,10 +40,12 @@ from sim_common import (
     fmt,
     phase_boundaries,
     split_mixture_ids,
+    normalize_multi_path_phase,
     write_csv,
     write_json,
 )
 from sim_v2.constants import DEFAULT_DT_S, DEFAULT_TIMESTEPS
+from sim_v2.dynamics import bounded_channel_value, channel_dynamic_params, channel_value
 
 
 SLOW_CHANNELS = [
@@ -63,6 +68,9 @@ VALID_STORAGE_FORMATS = {"memmap", "npz", "both"}
 DATASET_VERSION = "V3.1"
 DATASET_VERSION_LABEL = "V3.1 dual-channel waveform"
 GENERATION_SEED = 20260514
+DEFAULT_NOISE_SEED_COUNT = 3
+WAVEFORM_PATH_LMS = (0.2, 0.6, 1.0, 1.4)
+SLOW_DYNAMIC_CHANNELS = ("V_NDIR_CH4", "V_NDIR_CO2", "V_TCS")
 
 
 def generate_waveform_dataset(
@@ -72,19 +80,33 @@ def generate_waveform_dataset(
     seed=GENERATION_SEED,
     dt_s=DEFAULT_DT_S,
     storage="memmap",
+    noise_seed_count=DEFAULT_NOISE_SEED_COUNT,
+    multi_path_phase=MULTI_PATH_PHASE_STEADY,
 ):
     if timesteps < 4:
         raise ValueError("timesteps must be >= 4")
     if storage not in VALID_STORAGE_FORMATS:
         raise ValueError(f"storage must be one of {sorted(VALID_STORAGE_FORMATS)}, got {storage}")
+    if sequence_count <= 0:
+        raise ValueError("sequence_count must be positive")
+    if noise_seed_count <= 0:
+        raise ValueError("noise_seed_count must be positive")
 
+    multi_path_phase = normalize_multi_path_phase(multi_path_phase)
     output_dir = Path(output_dir)
     rng = random.Random(seed)
     paths = build_waveform_output_paths(output_dir)
     ultrasonic_spec = WaveformV3Spec()
     fiber_mic_spec = FiberMicV3Spec()
-    conditions = _waveform_sequence_condition_rows_four_component(sequence_count, rng, ultrasonic_spec)
+    conditions = _waveform_sequence_condition_rows_four_component(
+        sequence_count,
+        rng,
+        ultrasonic_spec,
+        noise_seed_count,
+        multi_path_phase,
+    )
     sequence_ids = [row["sequence_id"] for row in conditions]
+    base_condition_count = len({row["base_condition_id"] for row in conditions})
     labels = np.array(
         [[float(row[name]) for name in FOUR_COMPONENT_LABEL_FIELDS] for row in conditions],
         dtype=np.float32,
@@ -98,6 +120,7 @@ def generate_waveform_dataset(
         storage,
         ultrasonic_spec,
         fiber_mic_spec,
+        multi_path_phase,
     )
 
     train_ids, val_ids, test_ids = split_mixture_ids([row["mixture_id"] for row in conditions], seed=seed)
@@ -113,14 +136,44 @@ def generate_waveform_dataset(
     )
 
     write_csv(paths["sequence_index"], ["sequence_id", "mixture_id", "stage_profile", "status", "n_timesteps", "dt_s"], build_index_rows(conditions, timesteps, dt_s))
-    write_csv(paths["condition_grid_sequence"], ["sequence_id", "mixture_id", "x_H2", "x_CH4", "x_CO2", "x_N2", "T_C_base", "P_MPa_base", "H_RH_base", "L_m_base", "status"], conditions)
+    write_csv(
+        paths["condition_grid_sequence"],
+        [
+            "sequence_id",
+            "base_condition_id",
+            "mixture_id",
+            "noise_seed_index",
+            "noise_seed",
+            "multi_path_phase",
+            "x_H2",
+            "x_CH4",
+            "x_CO2",
+            "x_N2",
+            "T_C_base",
+            "P_MPa_base",
+            "H_RH_base",
+            "L_m_base",
+            "status",
+        ],
+        conditions,
+    )
     write_csv(paths["slow_sequence_long"], SLOW_SEQUENCE_FIELDS, arrays["slow_rows"])
     write_csv(paths["sequence_labels"], ["sequence_id", *FOUR_COMPONENT_LABEL_FIELDS], build_label_rows(conditions, FOUR_COMPONENT_LABEL_FIELDS))
     write_csv(paths["train_split"], ["sequence_id", "mixture_id"], split_rows["train"])
     write_csv(paths["val_split"], ["sequence_id", "mixture_id"], split_rows["val"])
     write_csv(paths["test_split"], ["sequence_id", "mixture_id"], split_rows["test"])
 
-    _write_waveform_metadata(paths, sequence_ids, ultrasonic_spec, fiber_mic_spec, timesteps, dt_s)
+    _write_waveform_metadata(
+        paths,
+        sequence_ids,
+        ultrasonic_spec,
+        fiber_mic_spec,
+        timesteps,
+        dt_s,
+        base_condition_count,
+        noise_seed_count,
+        multi_path_phase,
+    )
     _write_label_array(paths, labels, storage)
     if storage in {"npz", "both"}:
         np.savez_compressed(
@@ -151,15 +204,21 @@ def generate_waveform_dataset(
             storage=storage,
             ultrasonic_spec=ultrasonic_spec,
             fiber_mic_spec=fiber_mic_spec,
+            base_condition_count=base_condition_count,
+            noise_seed_count=noise_seed_count,
+            multi_path_phase=multi_path_phase,
         ),
     )
     paths["readme"].parent.mkdir(parents=True, exist_ok=True)
     paths["readme"].write_text(
         _waveform_readme(
             sequence_count=len(sequence_ids),
+            base_condition_count=base_condition_count,
             timesteps=timesteps,
             split_distribution=split_distribution,
             storage=storage,
+            noise_seed_count=noise_seed_count,
+            multi_path_phase=multi_path_phase,
         ),
         encoding="utf-8",
     )
@@ -194,20 +253,34 @@ def build_waveform_output_paths(output_dir):
     }
 
 
-def _waveform_sequence_condition_rows_four_component(sequence_count, rng, spec):
-    rows = []
+def _waveform_sequence_condition_rows_four_component(sequence_count, rng, spec, noise_seed_count, multi_path_phase):
+    base_rows = []
     requested = max(8, sequence_count)
-    while len(rows) < sequence_count:
+    while len(base_rows) < sequence_count:
         candidates = build_synthetic_condition_rows_four_component(requested, rng)
         for candidate in candidates:
             if _condition_fits_waveform_window(candidate, spec):
-                rows.append(candidate)
-                if len(rows) == sequence_count:
+                base_rows.append(candidate)
+                if len(base_rows) == sequence_count:
                     break
         requested = int(requested * 1.25) + 1
 
-    for index, row in enumerate(rows, start=1):
-        row["sequence_id"] = f"Q{index:06d}"
+    rows = []
+    sequence_index = 1
+    for base_index, base_row in enumerate(base_rows, start=1):
+        base_condition_id = f"B{base_index:06d}"
+        condition_seed = rng.randrange(0, 2**32)
+        for noise_seed_index in range(noise_seed_count):
+            row = dict(base_row)
+            row["sequence_id"] = f"Q{sequence_index:06d}"
+            row["base_condition_id"] = base_condition_id
+            row["noise_seed_index"] = str(noise_seed_index)
+            row["noise_seed"] = str(noise_seed_index)
+            row["multi_path_phase"] = multi_path_phase
+            row["_condition_seed"] = str(condition_seed)
+            row["_sequence_seed"] = str(rng.randrange(0, 2**32))
+            rows.append(row)
+            sequence_index += 1
     return rows
 
 
@@ -223,51 +296,74 @@ def _condition_fits_waveform_window(condition, spec):
     return 0 <= peak_index < spec.waveform_samples
 
 
-def _build_waveform_sequence_arrays(conditions, timesteps, dt_s, rng, paths, storage, ultrasonic_spec, fiber_mic_spec):
+def _build_waveform_sequence_arrays(
+    conditions,
+    timesteps,
+    dt_s,
+    rng,
+    paths,
+    storage,
+    ultrasonic_spec,
+    fiber_mic_spec,
+    multi_path_phase,
+):
+    del rng
     sequence_count = len(conditions)
     arrays = _open_waveform_arrays(paths, sequence_count, timesteps, storage, ultrasonic_spec, fiber_mic_spec)
     slow_rows = []
     q1, q2, q3 = phase_boundaries(timesteps)
+    is_baseline_scan = multi_path_phase == MULTI_PATH_PHASE_BASELINE
+    is_steady_scan = multi_path_phase == MULTI_PATH_PHASE_STEADY
 
     for seq_index, condition in enumerate(conditions):
+        condition_rng = random.Random(int(condition["_condition_seed"]))
+        sequence_rng = random.Random(int(condition["_sequence_seed"]))
         baseline_main = _generate_main_features(
-            {
-                "x_H2": "0.000000",
-                "x_CH4": "0.000000",
-                "x_CO2": "0.000000",
-                "x_N2": "100.000000",
-                "T_C": condition["T_C_base"],
-                "P_MPa": condition["P_MPa_base"],
-                "H_RH": condition["H_RH_base"],
-                "L_m": condition["L_m_base"],
-            },
-            rng,
+            _main_feature_condition(condition, 0.0, 0.0, 0.0, 100.0, float(condition["L_m_base"])),
+            condition_rng,
             PROCESSING_PARAMS,
         )
         target_main = _generate_main_features(
-            {
-                "x_H2": condition["x_H2"],
-                "x_CH4": condition["x_CH4"],
-                "x_CO2": condition["x_CO2"],
-                "x_N2": condition["x_N2"],
-                "T_C": condition["T_C_base"],
-                "P_MPa": condition["P_MPa_base"],
-                "H_RH": condition["H_RH_base"],
-                "L_m": condition["L_m_base"],
-            },
-            rng,
+            _main_feature_condition(
+                condition,
+                float(condition["x_H2"]),
+                float(condition["x_CH4"]),
+                float(condition["x_CO2"]),
+                float(condition["x_N2"]),
+                float(condition["L_m_base"]),
+            ),
+            condition_rng,
             PROCESSING_PARAMS,
         )
+        slow_params = channel_dynamic_params(sequence_rng)
+        slow_walk = {channel: 0.0 for channel in SLOW_DYNAMIC_CHANNELS}
         for timestep in range(timesteps):
             phase_id = _phase_for_timestep_with_bounds(timestep, q1, q2, q3)
             blend = _phase_blend(timestep, q1, q2, q3)
-            current = _blend_main_features(baseline_main, target_main, blend)
+            current = _dynamic_slow_features(
+                baseline_main,
+                target_main,
+                timestep,
+                timesteps,
+                slow_params,
+                slow_walk,
+                sequence_rng,
+            )
             composition = _blend_composition(condition, blend)
             current["T_C"] = float(condition["T_C_base"])
             current["P_MPa"] = float(condition["P_MPa_base"])
             current["H_RH"] = float(condition["H_RH_base"])
-            current["L_m"] = float(condition["L_m_base"])
-            current["piston_position_m"] = float(condition["L_m_base"])
+            current_l_m = _path_l_m_for_timestep(
+                float(condition["L_m_base"]),
+                timestep,
+                q1,
+                q2,
+                q3,
+                is_baseline_scan,
+                is_steady_scan,
+            )
+            current["L_m"] = current_l_m
+            current["piston_position_m"] = current_l_m
             slow_values = [
                 float(current["V_NDIR_CH4"]),
                 float(current["V_NDIR_CO2"]),
@@ -289,7 +385,7 @@ def _build_waveform_sequence_arrays(conditions, timesteps, dt_s, rng, paths, sto
                 p_mpa=float(current["P_MPa"]),
                 h_rh=float(current["H_RH"]),
                 l_m=float(current["L_m"]),
-                seed=rng.randrange(0, 2**32),
+                seed=sequence_rng.randrange(0, 2**32),
                 spec=ultrasonic_spec,
             )
             fiber_result = simulate_fiber_mic_measurement(
@@ -301,7 +397,7 @@ def _build_waveform_sequence_arrays(conditions, timesteps, dt_s, rng, paths, sto
                 p_mpa=float(current["P_MPa"]),
                 h_rh=float(current["H_RH"]),
                 l_m=float(current["L_m"]),
-                seed=rng.randrange(0, 2**32),
+                seed=sequence_rng.randrange(0, 2**32),
                 spec=fiber_mic_spec,
             )
             arrays["ultrasonic"][seq_index, timestep, :] = ultrasonic_result["waveform_int16"]
@@ -369,7 +465,17 @@ def _write_label_array(paths, labels, storage):
         y_memmap.flush()
 
 
-def _write_waveform_metadata(paths, sequence_ids, ultrasonic_spec, fiber_mic_spec, timesteps, dt_s):
+def _write_waveform_metadata(
+    paths,
+    sequence_ids,
+    ultrasonic_spec,
+    fiber_mic_spec,
+    timesteps,
+    dt_s,
+    base_condition_count,
+    noise_seed_count,
+    multi_path_phase,
+):
     paths["sequence_ids_npy"].parent.mkdir(parents=True, exist_ok=True)
     np.save(paths["sequence_ids_npy"], np.array(sequence_ids))
     np.save(paths["slow_channel_names_npy"], np.array(SLOW_CHANNELS))
@@ -385,8 +491,12 @@ def _write_waveform_metadata(paths, sequence_ids, ultrasonic_spec, fiber_mic_spe
             "slow_channels": list(SLOW_CHANNELS),
             "labels": list(FOUR_COMPONENT_LABEL_FIELDS),
             "sequences": len(sequence_ids),
+            "base_conditions": base_condition_count,
             "timesteps": timesteps,
             "dt_s": dt_s,
+            "noise_seed_count": noise_seed_count,
+            "multi_path_phase": multi_path_phase,
+            "path_lms": list(WAVEFORM_PATH_LMS) if multi_path_phase != MULTI_PATH_PHASE_OFF else [],
         },
     )
 
@@ -431,7 +541,70 @@ def _blend_composition(condition, blend):
     }
 
 
-def _waveform_quality_summary(sequence_ids, timesteps, split_distribution, split_warnings, storage, ultrasonic_spec, fiber_mic_spec):
+def _main_feature_condition(condition, x_h2, x_ch4, x_co2, x_n2, l_m):
+    return {
+        "x_H2": fmt(x_h2, 6),
+        "x_CH4": fmt(x_ch4, 6),
+        "x_CO2": fmt(x_co2, 6),
+        "x_N2": fmt(x_n2, 6),
+        "T_C": condition["T_C_base"],
+        "P_MPa": condition["P_MPa_base"],
+        "H_RH": condition["H_RH_base"],
+        "L_m": fmt(l_m, 6),
+    }
+
+
+def _dynamic_slow_features(baseline_main, target_main, timestep, timesteps, slow_params, slow_walk, sequence_rng):
+    current = {}
+    for channel in SLOW_DYNAMIC_CHANNELS:
+        value = channel_value(
+            baseline=float(baseline_main[channel]),
+            target=float(target_main[channel]),
+            timestep=timestep,
+            timesteps=timesteps,
+            tau_rise_system_s=slow_params[channel]["tau_rise_system_s"],
+            tau_decay_system_s=slow_params[channel]["tau_decay_system_s"],
+        )
+        slow_walk[channel] += sequence_rng.gauss(0.0, slow_params[channel]["random_walk_sigma"])
+        value += slow_params[channel]["drift_slope"] * timestep
+        value += slow_walk[channel]
+        value += sequence_rng.gauss(0.0, slow_params[channel]["noise_sigma"])
+        current[channel] = bounded_channel_value(channel, value)
+    return current
+
+
+def _baseline_subsegment_index(timestep, baseline_end, num_paths):
+    sub_size = max(1, baseline_end // num_paths)
+    return min(num_paths - 1, timestep // sub_size)
+
+
+def _steady_subsegment_index(timestep, steady_start, steady_end, num_paths):
+    local = timestep - steady_start
+    span = max(1, steady_end - steady_start)
+    sub_size = max(1, span // num_paths)
+    return min(num_paths - 1, local // sub_size)
+
+
+def _path_l_m_for_timestep(l_m_base, timestep, q1, q2, q3, is_baseline_scan, is_steady_scan):
+    if is_baseline_scan and timestep < q1:
+        return float(WAVEFORM_PATH_LMS[_baseline_subsegment_index(timestep, q1, len(WAVEFORM_PATH_LMS))])
+    if is_steady_scan and q2 <= timestep < q3:
+        return float(WAVEFORM_PATH_LMS[_steady_subsegment_index(timestep, q2, q3, len(WAVEFORM_PATH_LMS))])
+    return float(l_m_base)
+
+
+def _waveform_quality_summary(
+    sequence_ids,
+    timesteps,
+    split_distribution,
+    split_warnings,
+    storage,
+    ultrasonic_spec,
+    fiber_mic_spec,
+    base_condition_count,
+    noise_seed_count,
+    multi_path_phase,
+):
     summary = build_common_summary(
         sequence_ids=sequence_ids,
         timesteps=timesteps,
@@ -472,6 +645,12 @@ def _waveform_quality_summary(sequence_ids, timesteps, split_distribution, split
     summary["calibration_status"] = "pending"
     summary["storage_format"] = storage
     summary["composition_timeline"] = "blended_baseline_to_target"
+    summary["base_condition_count"] = base_condition_count
+    summary["noise_seed_count"] = noise_seed_count
+    summary["multi_path"] = {
+        "phase": multi_path_phase,
+        "path_lms": list(WAVEFORM_PATH_LMS) if multi_path_phase != MULTI_PATH_PHASE_OFF else [],
+    }
     summary["waveform_files"] = {
         "ultrasonic_int16": "sequences/ultrasonic_int16.npy",
         "ultrasonic_scale": "sequences/ultrasonic_scale.npy",
@@ -487,7 +666,7 @@ def _waveform_quality_summary(sequence_ids, timesteps, split_distribution, split
     return summary
 
 
-def _waveform_readme(sequence_count, timesteps, split_distribution, storage):
+def _waveform_readme(sequence_count, base_condition_count, timesteps, split_distribution, storage, noise_seed_count, multi_path_phase):
     rows = [
         "| split | sequence_count | mixture_count |",
         "| --- | ---: | ---: |",
@@ -504,7 +683,11 @@ calibration_status: pending
 simulation_level: dual_waveform_dynamic_simulation
 storage_format: {storage}
 sequences: {sequence_count}
+base_conditions: {base_condition_count}
 timesteps: {timesteps}
+noise_seed_count: {noise_seed_count}
+multi_path_phase: {multi_path_phase}
+path_lms: {list(WAVEFORM_PATH_LMS) if multi_path_phase != MULTI_PATH_PHASE_OFF else []}
 ultrasonic_waveform_samples: {ULTRASONIC_WAVEFORM_SAMPLES}
 fiber_mic_waveform_samples: {FiberMicV3Spec().waveform_samples}
 slow_channels: {len(SLOW_CHANNELS)}
@@ -556,6 +739,8 @@ def main():
     parser.add_argument("--timesteps", type=int, default=DEFAULT_TIMESTEPS)
     parser.add_argument("--seed", type=int, default=GENERATION_SEED)
     parser.add_argument("--storage", choices=sorted(VALID_STORAGE_FORMATS), default="memmap")
+    parser.add_argument("--noise-seed-count", type=int, default=DEFAULT_NOISE_SEED_COUNT)
+    parser.add_argument("--multi-path-phase", choices=[MULTI_PATH_PHASE_OFF, MULTI_PATH_PHASE_BASELINE, MULTI_PATH_PHASE_STEADY], default=MULTI_PATH_PHASE_STEADY)
     args = parser.parse_args()
     generate_waveform_dataset(
         args.output_dir,
@@ -563,6 +748,8 @@ def main():
         timesteps=args.timesteps,
         seed=args.seed,
         storage=args.storage,
+        noise_seed_count=args.noise_seed_count,
+        multi_path_phase=args.multi_path_phase,
     )
 
 

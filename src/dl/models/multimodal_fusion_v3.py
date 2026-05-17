@@ -46,8 +46,8 @@ class MultimodalFusionV3Regressor(nn.Module):
         if self.use_waveform and not (self.use_ultrasonic or self.use_fiber_mic):
             raise ValueError("At least one waveform branch must be enabled when use_waveform=True")
 
-        self.ultrasonic_encoder = AcousticWaveformEncoder(embedding_dim=waveform_embedding_dim) if self.use_ultrasonic else None
-        self.fiber_mic_encoder = AcousticWaveformEncoder(embedding_dim=waveform_embedding_dim) if self.use_fiber_mic else None
+        self.ultrasonic_encoder = AcousticWaveformEncoder(embedding_dim=waveform_embedding_dim, dropout=dropout) if self.use_ultrasonic else None
+        self.fiber_mic_encoder = AcousticWaveformEncoder(embedding_dim=waveform_embedding_dim, dropout=dropout) if self.use_fiber_mic else None
         fused_dim = slow_dim
         if self.use_ultrasonic:
             fused_dim += waveform_embedding_dim

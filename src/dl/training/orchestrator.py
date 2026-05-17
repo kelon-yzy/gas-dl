@@ -295,7 +295,7 @@ def _restore_run_state_if_needed(ctx: TrainExecutionContext) -> None:
     if not resume_path:
         return
     ckpt = ctx.dependencies.load_checkpoint(Path(resume_path), ctx.device)
-    ctx.dependencies.validate_checkpoint_compat(ckpt, ctx.config, ctx.label_names)
+    ctx.dependencies.validate_checkpoint_compat(ckpt, ctx.config, ctx.label_names, model_state_keys=set(ctx.model.state_dict().keys()))
     ctx.model.load_state_dict(ckpt["model_state_dict"])
     ctx.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     ctx.scaler.load_state_dict(ckpt["amp_scaler_state_dict"])

@@ -69,9 +69,12 @@ def _restore_rng_state(state: dict) -> None:
     t_state = state["torch"]
     if t_state.device.type != "cpu":
         t_state = t_state.cpu()
-    torch.set_rng_state(t_state)
+    torch.set_rng_state(t_state.to(torch.uint8))
     if state.get("cuda") and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        cuda_state = state["cuda"]
+        if isinstance(cuda_state, list):
+            cuda_state = [s.cpu().to(torch.uint8) for s in cuda_state]
+        torch.cuda.set_rng_state_all(cuda_state)
     numpy_data = state.get("numpy")
     if numpy_data is None:
         return
@@ -234,9 +237,36 @@ def _raise_checkpoint_mismatches(mismatches: list[str]) -> None:
         )
 
 
-def _validate_checkpoint_compat(ckpt: dict, config: dict, label_names: list | None = None) -> None:
+def _validate_model_architecture_compat(ckpt: dict, model_state_keys: set[str]) -> None:
+    """校验 checkpoint 中的 model_state_dict 键集合与当前模型是否一致。
+
+    架构升级（如新增 BN、投影头参数）后，旧 checkpoint 的键集合会与当前模型不匹配，
+    load_state_dict 会因键名/数量不一致报错。此函数在恢复前提前检测，给出更明确的提示。
+    """
+    ckpt_state = ckpt.get("model_state_dict")
+    if ckpt_state is None:
+        return
+    ckpt_keys = set(ckpt_state.keys())
+    if ckpt_keys == model_state_keys:
+        return
+    only_in_ckpt = ckpt_keys - model_state_keys
+    only_in_model = model_state_keys - ckpt_keys
+    parts: list[str] = ["Checkpoint model_state_dict 与当前模型架构不兼容。"]
+    if only_in_ckpt:
+        parts.append(f"  checkpoint 独有（当前模型已移除）: {sorted(only_in_ckpt)}")
+    if only_in_model:
+        parts.append(f"  当前模型独有（checkpoint 中缺失）: {sorted(only_in_model)}")
+    parts.append("模型架构已变更，请从头训练或使用匹配的 checkpoint。")
+    raise ValueError("\n".join(parts))
+
+
+def _validate_checkpoint_compat(
+    ckpt: dict, config: dict, label_names: list | None = None, model_state_keys: set[str] | None = None
+) -> None:
     _validate_model_name_match(ckpt, config)
     _validate_required_checkpoint_keys(ckpt)
+    if model_state_keys is not None:
+        _validate_model_architecture_compat(ckpt, model_state_keys)
     ckpt_config = ckpt.get("config", {})
     if not ckpt_config:
         return

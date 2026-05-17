@@ -72,7 +72,7 @@ def _amp_context(device: torch.device, enabled: bool):
 
 
 def _move_waveform_batch(batch: dict, device: torch.device) -> dict:
-    return {
+    moved = {
         "ultrasonic": _move_tensor(batch["ultrasonic"], device),
         "ultrasonic_scale": _move_tensor(batch["ultrasonic_scale"], device),
         "fiber_mic": _move_tensor(batch["fiber_mic"], device),
@@ -81,6 +81,9 @@ def _move_waveform_batch(batch: dict, device: torch.device) -> dict:
         "target": _move_tensor(batch["target"], device),
         "meta": batch["meta"],
     }
+    if "stage_one_hot" in batch:
+        moved["stage_one_hot"] = _move_tensor(batch["stage_one_hot"], device)
+    return moved
 
 
 def _forward_batch(model, batch, device):
@@ -93,6 +96,7 @@ def _forward_batch(model, batch, device):
                 moved["fiber_mic"],
                 moved["fiber_mic_scale"],
                 moved["slow"],
+                stage_one_hot=moved.get("stage_one_hot"),
             )
         else:
             slow_input = moved["slow"]

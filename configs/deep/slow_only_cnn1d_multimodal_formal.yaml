@@ -15,6 +15,8 @@ data:
 model:
   name: cnn1d_multimodal
   slow_dim: 8
+  use_stage_one_hot: true
+  stage_dim: 4
   hidden_channels: [32, 64, 64]
   kernel_size: 5
   dropout: 0.1
