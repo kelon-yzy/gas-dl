@@ -47,6 +47,7 @@ class CheckpointBuildContext:
     status: str = "running"
     label_names: list | None = None
     scheduler: Any = None
+    loss_fn: Any = None
 
 
 def _capture_rng_state() -> dict:
@@ -112,6 +113,12 @@ def _state_dict_to_cpu(state_dict: dict) -> dict:
 def _checkpoint_payload(context: CheckpointBuildContext) -> dict:
     model_state = _state_dict_to_cpu(context.model.state_dict())
     optimizer_state = _state_dict_to_cpu(context.optimizer.state_dict())
+    # 保存 loss_fn 状态（UncertaintyWeightedLoss 含可学参数）
+    loss_fn_state = None
+    if context.loss_fn is not None and hasattr(context.loss_fn, "state_dict"):
+        loss_state = context.loss_fn.state_dict()
+        if loss_state:  # 非空才保存
+            loss_fn_state = _state_dict_to_cpu(loss_state)
     return {
         "format_version": 1,
         "status": context.status,
@@ -122,6 +129,7 @@ def _checkpoint_payload(context: CheckpointBuildContext) -> dict:
         "label_names": context.label_names,
         "model_state_dict": model_state,
         "optimizer_state_dict": optimizer_state,
+        "loss_fn_state_dict": loss_fn_state,
         "amp_scaler_state_dict": context.scaler.state_dict(),
         "scheduler_state_dict": context.scheduler.state_dict() if context.scheduler is not None else None,
         "early_stopping": {

@@ -142,6 +142,33 @@ def _build_optimizer(model, training_config: dict):
     return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
 
+def _build_optimizer_with_loss(model, loss_fn, training_config: dict):
+    """构建优化器，若 loss_fn 含可学参数（如 UncertaintyWeightedLoss），一并加入优化。
+
+    loss 参数使用独立学习率（默认为模型lr的10倍），不施加 weight_decay。
+    """
+    lr = float(training_config.get("learning_rate", 1e-3))
+    wd = float(training_config.get("weight_decay", 0.01))
+    optimizer_name = training_config.get("optimizer", "adam").lower()
+
+    # 收集 loss_fn 中的可学参数
+    loss_params = list(loss_fn.parameters())
+    if not loss_params:
+        # 无可学参数，退回普通 optimizer
+        return _build_optimizer(model, training_config)
+
+    # loss 参数使用较高学习率（Kendall论文建议），不加 weight_decay
+    loss_lr_multiplier = float(training_config.get("uncertainty_weighted", {}).get("lr_multiplier", 10.0))
+    param_groups = [
+        {"params": model.parameters(), "lr": lr, "weight_decay": wd},
+        {"params": loss_params, "lr": lr * loss_lr_multiplier, "weight_decay": 0.0},
+    ]
+
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(param_groups)
+    return torch.optim.Adam(param_groups)
+
+
 def _prepare_scheduler(optimizer, total_epochs: int, training_config: dict):
     scheduler_cfg = training_config.get("lr_scheduler")
     if scheduler_cfg is None:
@@ -217,8 +244,11 @@ def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bo
         config["training"].get("loss", "mse"),
         sum_constraint=config["training"].get("sum_constraint"),
         label_weights=label_weights,
+        uncertainty_weighted=config["training"].get("uncertainty_weighted"),
     )
-    optimizer = _build_optimizer(model, config["training"])
+    # 将 loss_fn 移到设备上（UncertaintyWeightedLoss 含可学参数）
+    loss_fn = loss_fn.to(device)
+    optimizer = _build_optimizer_with_loss(model, loss_fn, config["training"])
     stopper = EarlyStopping(patience=int(config["training"].get("early_stopping_patience", 25)), mode="min")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     total_epochs = int(config["training"].get("epochs", 200))
@@ -328,6 +358,7 @@ def _checkpoint_context(ctx: TrainExecutionContext, epoch: int, log_rows: list, 
         status=status,
         label_names=ctx.label_names,
         scheduler=ctx.scheduler,
+        loss_fn=ctx.loss_fn,
     )
 
 
@@ -345,6 +376,10 @@ def _restore_run_state_if_needed(ctx: TrainExecutionContext) -> None:
     ctx.model.load_state_dict(ckpt["model_state_dict"])
     ctx.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     ctx.scaler.load_state_dict(ckpt["amp_scaler_state_dict"])
+    # 恢复 loss_fn 状态（UncertaintyWeightedLoss 的 log_sigmas）
+    loss_fn_state = ckpt.get("loss_fn_state_dict")
+    if loss_fn_state is not None and hasattr(ctx.loss_fn, "load_state_dict"):
+        ctx.loss_fn.load_state_dict(loss_fn_state)
     ctx.dependencies.restore_early_stopping(ctx.stopper, ckpt.get("early_stopping", {}))
     if ctx.scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
         ctx.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -450,23 +485,44 @@ def _should_write_last_ckpt(ctx: TrainExecutionContext, epoch: int) -> bool:
     return (epoch % interval) == 0
 
 
+def _get_uncertainty_info(loss_fn) -> dict:
+    """从 loss_fn 中提取 UncertaintyWeightedLoss 的当前权重信息。"""
+    from training.losses import UncertaintyWeightedLoss
+    # 可能直接是 UncertaintyWeightedLoss，也可能被 SumConstraintLoss 包裹
+    uw_loss = None
+    if isinstance(loss_fn, UncertaintyWeightedLoss):
+        uw_loss = loss_fn
+    elif hasattr(loss_fn, "base_loss") and isinstance(loss_fn.base_loss, UncertaintyWeightedLoss):
+        uw_loss = loss_fn.base_loss
+    if uw_loss is None:
+        return {}
+    sigmas = uw_loss.get_sigmas().cpu().numpy()
+    weights = uw_loss.get_weights().cpu().numpy()
+    return {
+        "uw_sigmas": [float(s) for s in sigmas],
+        "uw_weights": [float(w) for w in weights],
+    }
+
+
 def _record_epoch_result(ctx: TrainExecutionContext, epoch: int, result: EpochResult) -> None:
     lr = ctx.optimizer.param_groups[0]["lr"]
-    ctx.log_rows.append(
-        {
-            "epoch": epoch,
-            "train_loss": result.train_loss,
-            "val_loss": result.val_loss,
-            "val_macro_RMSE": result.monitor_value,
-            "val_macro_MAE": result.val_macro_mae,
-            "val_mean_pred_sum": result.val_mean_pred_sum,
-            "val_mean_abs_sum_error": result.val_mean_abs_sum_error,
-            "val_std_pred_sum": result.val_std_pred_sum,
-            "improved": result.improved,
-            "lr": lr,
-            "val_skipped": result.val_skipped,
-        }
-    )
+    row = {
+        "epoch": epoch,
+        "train_loss": result.train_loss,
+        "val_loss": result.val_loss,
+        "val_macro_RMSE": result.monitor_value,
+        "val_macro_MAE": result.val_macro_mae,
+        "val_mean_pred_sum": result.val_mean_pred_sum,
+        "val_mean_abs_sum_error": result.val_mean_abs_sum_error,
+        "val_std_pred_sum": result.val_std_pred_sum,
+        "improved": result.improved,
+        "lr": lr,
+        "val_skipped": result.val_skipped,
+    }
+    # 附加 uncertainty weighting 监控信息
+    uw_info = _get_uncertainty_info(ctx.loss_fn)
+    row.update(uw_info)
+    ctx.log_rows.append(row)
     if result.improved and not result.val_skipped:
         torch.save(ctx.model.state_dict(), ctx.best_path)
         _save_run_checkpoint(ctx, ctx.best_ckpt_path, epoch, ctx.log_rows, "running")

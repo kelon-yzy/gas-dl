@@ -18,6 +18,42 @@ class WeightedMSELoss(torch.nn.Module):
         return (sq * self.weights.to(sq.dtype).to(sq.device)).mean()
 
 
+class UncertaintyWeightedLoss(torch.nn.Module):
+    """可学习不确定性加权 (Kendall et al., CVPR 2018).
+
+    每个输出维度学习一个 log_sigma 参数，loss 公式：
+        L = Σ_i [ 0.5 * exp(-2*log_σ_i) * MSE_i + log_σ_i ]
+
+    log_σ_i 作为可学参数与模型一起优化，自动平衡各组分权重。
+    正则项 log_σ_i 防止权重塌缩（σ→∞ 使某组分loss为0）。
+    """
+
+    def __init__(self, num_tasks: int = 4, init_log_sigma: float = 0.0):
+        super().__init__()
+        # 初始化 log_sigma，默认为0 → σ=1 → 权重=0.5（各组分初始等权）
+        self.log_sigmas = torch.nn.Parameter(
+            torch.full((num_tasks,), init_log_sigma, dtype=torch.float32)
+        )
+
+    def forward(self, pred, target):
+        # 逐组分计算 MSE：shape (batch, num_tasks) → 对 batch 求均值 → (num_tasks,)
+        per_task_mse = ((pred - target) ** 2).mean(dim=0)
+        # 加权 loss：precision * mse + 正则项
+        precision = torch.exp(-2.0 * self.log_sigmas)
+        weighted = 0.5 * precision * per_task_mse + self.log_sigmas
+        return weighted.sum()
+
+    def get_weights(self) -> torch.Tensor:
+        """返回当前各组分的有效权重 (precision = 1/(2σ²))，用于监控。"""
+        with torch.no_grad():
+            return torch.exp(-2.0 * self.log_sigmas)
+
+    def get_sigmas(self) -> torch.Tensor:
+        """返回当前各组分的 σ 值。"""
+        with torch.no_grad():
+            return torch.exp(self.log_sigmas)
+
+
 class WeightedL1Loss(torch.nn.Module):
     """按列加权的 MAE。"""
 
@@ -57,9 +93,25 @@ class SumConstraintLoss(torch.nn.Module):
         return base_value + self.weight * sum_value
 
 
-def build_loss(name: str, sum_constraint: dict | None = None, label_weights: torch.Tensor | None = None):
+def build_loss(
+    name: str,
+    sum_constraint: dict | None = None,
+    label_weights: torch.Tensor | None = None,
+    uncertainty_weighted: dict | None = None,
+):
+    """构建 loss 函数。
+
+    参数优先级：uncertainty_weighted > label_weights > 默认等权。
+    当使用 uncertainty_weighted 时，忽略 label_weights（因为权重是自动学习的）。
+    """
     normalized = name.lower()
-    if label_weights is not None:
+
+    # 优先使用可学习不确定性加权
+    if uncertainty_weighted:
+        num_tasks = int(uncertainty_weighted.get("num_tasks", 4))
+        init_log_sigma = float(uncertainty_weighted.get("init_log_sigma", 0.0))
+        base_loss = UncertaintyWeightedLoss(num_tasks=num_tasks, init_log_sigma=init_log_sigma)
+    elif label_weights is not None:
         if normalized == "mse":
             base_loss = WeightedMSELoss(label_weights)
         elif normalized == "mae":
