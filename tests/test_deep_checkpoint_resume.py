@@ -179,6 +179,23 @@ class CheckpointHelperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validate_checkpoint_compat(ckpt, config_bad)
 
+    def test_validate_checkpoint_compat_rejects_old_cnn1d_tcn_fusion_for_slow_branch_variant(self):
+        ckpt = {
+            "model_name": "cnn1d_tcn_fusion",
+            "format_version": 1,
+            "epoch": 0,
+            "total_epochs": 2,
+            "model_state_dict": {},
+            "optimizer_state_dict": {},
+            "amp_scaler_state_dict": {},
+            "early_stopping": {},
+            "log_rows": [],
+            "rng_state": {},
+        }
+        config = {"model": {"name": "cnn1d_tcn_fusion_slow_branch"}}
+        with self.assertRaises(ValueError):
+            _validate_checkpoint_compat(ckpt, config)
+
     def test_validate_checkpoint_compat_missing_keys(self):
         ckpt = {"format_version": 1, "model_name": "cnn1d"}
         config = {"model": {"name": "cnn1d"}}

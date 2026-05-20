@@ -150,6 +150,28 @@ class LRSchedulerTests(unittest.TestCase):
         self.assertEqual(model["tcn_dropout"], 0.25)
         self.assertEqual(model["head_dropout"], 0.25)
 
+    def test_slow_branch_cnn1d_tcn_fusion_config_reuses_current_uw_training_setup(self):
+        """慢变量分支实验配置应使用 Softplus+Normalize 头，训练目标改为纯 MSE。"""
+        config_path = ROOT / "configs" / "deep" / "slow_branch_cnn1d_tcn_fusion.yaml"
+        with config_path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        training = config["training"]
+        model = config["model"]
+        self.assertEqual(config["run"]["name"], "v3_slow_branch_cnn1d_tcn_fusion_seed42")
+        self.assertEqual(model["name"], "cnn1d_tcn_fusion_slow_branch")
+        self.assertEqual(model["slow_encoder"]["enabled"], True)
+        self.assertEqual(model["slow_encoder"]["hidden_dim"], 32)
+        self.assertEqual(model["slow_encoder"]["embedding_dim"], 64)
+        self.assertEqual(training["batch_size"], 64)
+        self.assertEqual(training["learning_rate"], 0.0002)
+        self.assertEqual(training["early_stopping_patience"], 30)
+        self.assertEqual(training["loss"], "mse")
+        self.assertIsNone(training.get("uncertainty_weighted"))
+        self.assertIsNone(training.get("sum_constraint"))
+        self.assertEqual(training["lr_scheduler"]["type"], "cosine_warmup")
+        self.assertEqual(training["lr_scheduler"]["warmup_epochs"], 15)
+        self.assertEqual(training["lr_scheduler"]["eta_min"], 0.00001)
+
 
 if __name__ == "__main__":
     unittest.main()

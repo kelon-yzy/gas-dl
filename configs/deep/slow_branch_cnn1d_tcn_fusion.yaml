@@ -1,0 +1,58 @@
+# 实验: 慢变量分支隔离改造
+# 目标: 验证慢变量先编码再与声学 embedding 融合，是否能缓解 CO2 / N2 被均值化的问题
+# 训练参数沿用当前 uncertainty-weighted 基线，只改变模型结构
+
+run:
+  name: v3_slow_branch_cnn1d_tcn_fusion_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_slow_branch_cnn1d_tcn_fusion_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_tcn_fusion_slow_branch
+  slow_dim: 8
+  waveform_embedding_dim: 64
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  tcn_channels: [64, 64, 64]
+  tcn_kernel_size: 3
+  tcn_dropout: 0.25
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+  slow_encoder:
+    enabled: true
+    hidden_dim: 32
+    embedding_dim: 64
+
+training:
+  epochs: 150
+  batch_size: 64
+  device: auto
+  amp: false
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: false
+  uncertainty_weighted: null
+  sum_constraint: null
+  early_stopping_patience: 30
+  num_workers: 4
+  eval_num_workers: 2
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 15
+    eta_min: 0.00001
