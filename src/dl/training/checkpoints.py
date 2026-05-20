@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -146,9 +148,13 @@ def _checkpoint_payload(context: CheckpointBuildContext) -> dict:
 
 
 def _save_checkpoint(path: Path, payload: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, tmp)
-    tmp.replace(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
+        torch.save(payload, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+        tmp_path = Path(handle.name)
+    tmp_path.replace(path)
 
 
 def _load_checkpoint(path: Path, device: torch.device) -> dict:
