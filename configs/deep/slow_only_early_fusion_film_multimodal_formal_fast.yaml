@@ -1,0 +1,69 @@
+run:
+  name: v3_early_fusion_film_seed42_fast
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_early_fusion_film_seed42_fast
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: early_fusion_film
+  slow_dim: 8
+  d_model: 128
+  conv_channels: [32, 64, 96, 128]
+  conv_kernels: [15, 11, 7, 5]
+  conv_dropout: 0.0
+  transformer_layers: 3
+  transformer_heads: 4
+  transformer_ff_mult: 4
+  transformer_dropout: 0.1
+  head_dropout: 0.15
+  out_dim: 4
+  max_timesteps: 120
+  use_positional_embedding: true
+  film_zero_init: true
+  use_ultrasonic: true
+  use_fiber_mic: true
+
+training:
+  epochs: 120
+  # A2: batch 32 → 40，配合 AMP 后预留 ~15% 显存裕度（batch=48 时实测打满 7.7GB/8GB）
+  batch_size: 40
+  device: auto
+  # A1: 开启混合精度，模型内部 _maybe_disable_autocast 已守住 int16→fp32+log 关键段
+  amp: true
+  optimizer: adamw
+  # A2 配套：线性 LR scaling，batch 32→40 即 1.25x，lr 3e-4 → 3.75e-4
+  learning_rate: 0.000375
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: true
+  sum_constraint:
+    weight: 0.1
+    target_sum: 100.0
+    penalty: mse
+  early_stopping_patience: 25
+  # A3: num_workers 4→6，eval 2→4，加 prefetch_factor=4 隐藏 IO 延迟
+  num_workers: 6
+  eval_num_workers: 4
+  prefetch_factor: 4
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  # A4: 前 20 epoch 每轮验证（监控早期收敛），之后默认每 epoch 也验证；如要再省时间，设为 2
+  val_every: 1
+  # A5: 每 3 epoch 写一次 last_checkpoint.pt（崩溃丢最多 2 epoch）
+  last_checkpoint_every: 3
+  # B3: torch.compile 开关；Windows 上 triton 兼容性不稳定，首次启用建议先 false 跑通
+  compile: false
+  compile_mode: reduce-overhead
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 10
+    # eta_min 保持 lr 的 0.1 倍
+    eta_min: 0.0000375

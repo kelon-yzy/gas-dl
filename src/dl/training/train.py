@@ -37,6 +37,7 @@ from training.runtime import (
     _train_one_epoch as _train_one_epoch_impl,
     _use_amp,
     apply_environment_augmentation,
+    configure_cudnn,
     evaluate_loss,
     evaluate_with_predictions,
     make_loader,

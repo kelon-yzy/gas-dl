@@ -366,6 +366,14 @@ class CheckpointIntegrationTests(unittest.TestCase):
             self.assertIn("last_checkpoint", summary)
             self.assertIn("best_checkpoint", summary)
 
+    def test_train_log_records_validation_sum_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run_train(tmp, epochs=1)
+            log = pd.read_csv(pathlib.Path(tmp) / "train_log.csv")
+            self.assertIn("val_mean_pred_sum", log.columns)
+            self.assertIn("val_mean_abs_sum_error", log.columns)
+            self.assertIn("val_std_pred_sum", log.columns)
+
     def test_resume_continues_from_next_epoch(self):
         with tempfile.TemporaryDirectory() as tmp:
             # 第一次：stop_after_epoch=1 暂停

@@ -129,10 +129,9 @@ def load_sequence_metadata(index_path: str | Path | None, sequence_ids: Iterable
     frame = pd.read_csv(path)
     if "sequence_id" not in frame.columns:
         raise ValueError(f"Missing sequence_id column in {path}")
-    if "mixture_id" not in frame.columns:
-        frame["mixture_id"] = frame["sequence_id"]
     merged = ids.merge(frame, on="sequence_id", how="left")
-    merged["mixture_id"] = merged["mixture_id"].fillna(merged["sequence_id"])
+    # 每条序列独立，不按 mixture_id 分组
+    merged["mixture_id"] = merged["sequence_id"]
     return merged
 
 

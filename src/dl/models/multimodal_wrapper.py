@@ -13,7 +13,7 @@ from models.transformer_encoder import TransformerRegressor
 
 # 每个 backbone 可接受的参数白名单
 _BACKBONE_KWARGS: dict[str, set[str]] = {
-    "CNN1DRegressor": {"in_channels", "hidden_channels", "kernel_size", "dropout", "out_dim"},
+    "CNN1DRegressor": {"in_channels", "hidden_channels", "kernel_size", "dropout", "out_dim", "temporal_pooling"},
     "GRURegressor": {"input_size", "hidden_size", "num_layers", "bidirectional", "dropout", "out_dim"},
     "LSTMRegressor": {"input_size", "hidden_size", "num_layers", "bidirectional", "dropout", "out_dim"},
     "TCNRegressor": {"in_channels", "channels", "kernel_size", "dropout", "out_dim"},
@@ -53,8 +53,6 @@ class MultimodalWrapper(nn.Module):
         use_fiber_mic: bool = True,
         waveform_embedding_dim: int = 64,
         waveform_dropout: float = 0.1,
-        use_stage_one_hot: bool = False,
-        stage_dim: int = 4,
     ):
         super().__init__()
         if not (use_ultrasonic or use_fiber_mic):
@@ -63,8 +61,6 @@ class MultimodalWrapper(nn.Module):
         self.use_ultrasonic = use_ultrasonic
         self.use_fiber_mic = use_fiber_mic
         self.waveform_embedding_dim = waveform_embedding_dim
-        self.use_stage_one_hot = use_stage_one_hot
-        self.stage_dim = stage_dim
         self.input_format = getattr(backbone, "input_format", "NTC").upper()
         self.backbone = backbone
 
@@ -78,7 +74,6 @@ class MultimodalWrapper(nn.Module):
         fiber_mic: torch.Tensor | None,
         fiber_mic_scale: torch.Tensor | None,
         slow: torch.Tensor,
-        stage_one_hot: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if slow.ndim != 3:
             raise ValueError(f"slow 必须为 3D [B, T, C], 实际 {tuple(slow.shape)}")
@@ -102,15 +97,6 @@ class MultimodalWrapper(nn.Module):
             embeds.append(f_emb)
 
         parts: list[torch.Tensor] = [*embeds, slow]
-        if self.use_stage_one_hot:
-            if stage_one_hot is None:
-                raise ValueError("use_stage_one_hot=True 但未传入 stage_one_hot")
-            if tuple(stage_one_hot.shape) != (B, T, self.stage_dim):
-                raise ValueError(
-                    f"stage_one_hot 必须为 {(B, T, self.stage_dim)}，实际 {tuple(stage_one_hot.shape)}"
-                )
-            parts.append(stage_one_hot)
-
         fused: torch.Tensor = torch.cat(parts, dim=-1)  # [B, T, fused_dim]
 
         if self.input_format == "NCT":
@@ -140,16 +126,12 @@ def _build_multimodal(
     use_fiber_mic = bool(kwargs.pop("use_fiber_mic", True))
     waveform_embedding_dim = int(kwargs.pop("waveform_embedding_dim", 64))
     waveform_dropout = float(kwargs.pop("waveform_dropout", 0.1))
-    use_stage_one_hot = bool(kwargs.pop("use_stage_one_hot", False))
-    stage_dim = int(kwargs.pop("stage_dim", 4))
 
     # ── 计算合并后的输入维度 ──
     enabled_count = int(use_ultrasonic) + int(use_fiber_mic)
     if enabled_count == 0:
         raise ValueError("至少需要开启一个波形分支 (use_ultrasonic 或 use_fiber_mic)")
-    if use_stage_one_hot and stage_dim != 4:
-        raise ValueError(f"stage_dim must be 4 when use_stage_one_hot=True, got {stage_dim}")
-    fused_dim = slow_dim + waveform_embedding_dim * enabled_count + (stage_dim if use_stage_one_hot else 0)
+    fused_dim = slow_dim + waveform_embedding_dim * enabled_count
 
     # ── 只传白名单内的参数给 backbone ──
     backbone_kwargs: dict = {input_param: fused_dim}
@@ -168,12 +150,11 @@ def _build_multimodal(
         use_fiber_mic=use_fiber_mic,
         waveform_embedding_dim=waveform_embedding_dim,
         waveform_dropout=waveform_dropout,
-        use_stage_one_hot=use_stage_one_hot,
-        stage_dim=stage_dim,
     )
 
 
 def build_cnn1d_multimodal(**kwargs) -> MultimodalWrapper:
+    kwargs.setdefault("temporal_pooling", "mean_max")
     return _build_multimodal(CNN1DRegressor, **kwargs)
 
 

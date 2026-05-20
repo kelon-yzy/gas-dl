@@ -6,6 +6,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch
 from models.registry import build_model
@@ -14,7 +15,7 @@ from training.data_setup import _ensure_scaler_path, _load_label_names, build_da
 from training.early_stopping import EarlyStopping
 from training.losses import build_loss
 from training.metrics import regression_metrics
-from training.runtime import TrainEpochRequest, _train_one_epoch, _use_amp, evaluate_with_predictions, make_loader, predict, save_predictions, select_device
+from training.runtime import TrainEpochRequest, _train_one_epoch, _use_amp, configure_cudnn, evaluate_with_predictions, make_loader, predict, save_predictions, select_device
 from training.seed import set_seed
 
 
@@ -107,8 +108,12 @@ class EpochResult:
     val_loss: float
     monitor_value: float
     val_macro_mae: float
+    val_mean_pred_sum: float
+    val_mean_abs_sum_error: float
+    val_std_pred_sum: float
     improved: bool
     epoch_seconds: float
+    val_skipped: bool = False
 
 
 def _default_dependencies() -> TrainDependencies:
@@ -148,7 +153,8 @@ def _prepare_scheduler(optimizer, total_epochs: int, training_config: dict):
     if stype == "cosine_warmup":
         warmup_epochs = int(scheduler_cfg.get("warmup_epochs", 5))
         eta_min = float(scheduler_cfg.get("eta_min", lr * 0.1))
-        warmup = LinearLR(optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_epochs)
+        warmup_start = eta_min / lr
+        warmup = LinearLR(optimizer, start_factor=warmup_start, end_factor=1.0, total_iters=warmup_epochs)
         cosine = CosineAnnealingLR(optimizer, T_max=total_epochs - warmup_epochs, eta_min=eta_min)
         return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
     if stype == "cosine":
@@ -174,22 +180,43 @@ def _prepare_loader_resources(config: dict, dependencies: TrainDependencies, out
     datasets, _ = dependencies.build_datasets(config)
     batch_size = int(config["training"].get("batch_size", 64))
     device = select_device(config["training"].get("device", "auto"))
+    configure_cudnn(config["training"], device)
     num_workers = int(config["training"].get("num_workers", 0))
     eval_num_workers = int(config["training"].get("eval_num_workers", 0))
+    prefetch_factor = config["training"].get("prefetch_factor")
     amp_enabled = _use_amp(config["training"], device)
     loaders = {
-        "train": make_loader(datasets["train"], batch_size, shuffle=True, device=device, num_workers=num_workers),
-        "val": make_loader(datasets["val"], batch_size, shuffle=False, device=device, num_workers=eval_num_workers),
-        "test": make_loader(datasets["test"], batch_size, shuffle=False, device=device, num_workers=eval_num_workers),
+        "train": make_loader(
+            datasets["train"], batch_size, shuffle=True, device=device,
+            num_workers=num_workers, prefetch_factor=prefetch_factor,
+        ),
+        "val": make_loader(
+            datasets["val"], batch_size, shuffle=False, device=device,
+            num_workers=eval_num_workers, prefetch_factor=prefetch_factor,
+        ),
+        "test": make_loader(
+            datasets["test"], batch_size, shuffle=False, device=device,
+            num_workers=eval_num_workers, prefetch_factor=prefetch_factor,
+        ),
     }
     return label_names, datasets, loaders, batch_size, device, num_workers, eval_num_workers, amp_enabled
 
 
-def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bool) -> tuple:
+def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bool, label_weights: torch.Tensor | None = None) -> tuple:
     model = build_model(config["model"]).to(device)
+    # B3: torch.compile 支持（默认关闭，需 PyTorch 2.0+；Windows 上需 triton 后端）
+    compile_cfg = config["training"].get("compile", False)
+    if compile_cfg and hasattr(torch, "compile"):
+        compile_mode = config["training"].get("compile_mode", "reduce-overhead")
+        try:
+            model = torch.compile(model, mode=compile_mode)
+        except Exception as exc:  # noqa: BLE001 - compile 失败不应阻断训练
+            import logging
+            logging.getLogger(__name__).warning("torch.compile 失败，回退到 eager 模式: %s", exc)
     loss_fn = build_loss(
         config["training"].get("loss", "mse"),
         sum_constraint=config["training"].get("sum_constraint"),
+        label_weights=label_weights,
     )
     optimizer = _build_optimizer(model, config["training"])
     stopper = EarlyStopping(patience=int(config["training"].get("early_stopping_patience", 25)), mode="min")
@@ -198,6 +225,23 @@ def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bo
     scheduler = _prepare_scheduler(optimizer, total_epochs, config["training"])
     grad_clip_norm = float(config["training"].get("grad_clip_norm", 0.0))
     return model, loss_fn, optimizer, stopper, scaler, total_epochs, grad_clip_norm, scheduler
+
+
+def _resolve_label_weights(training_config: dict, datasets: dict) -> torch.Tensor | None:
+    """读取 train dataset 上挂载的 label_std, 转成 1/var 权重传给 loss。
+
+    返回 None 时表示退回原始等权 MSE/MAE。
+    """
+    if not training_config.get("label_balanced_loss", False):
+        return None
+    train_ds = datasets.get("train")
+    label_std = getattr(train_ds, "label_std", None)
+    if label_std is None:
+        return None
+    std_arr = np.asarray(label_std, dtype=np.float32)
+    std_arr = np.where(std_arr < 1e-6, np.float32(1.0), std_arr)
+    weights = 1.0 / (std_arr ** 2)
+    return torch.from_numpy(weights.astype(np.float32))
 
 
 def _prepare_training_resources(config: dict, dependencies: TrainDependencies) -> PreparedTrainingResources:
@@ -209,10 +253,12 @@ def _prepare_training_resources(config: dict, dependencies: TrainDependencies) -
         dependencies,
         output_dir,
     )
+    label_weights = _resolve_label_weights(config["training"], datasets)
     model, loss_fn, optimizer, stopper, scaler, total_epochs, grad_clip_norm, scheduler = _prepare_model_resources(
         config,
         device,
         amp_enabled,
+        label_weights=label_weights,
     )
     return PreparedTrainingResources(
         output_dir=output_dir,
@@ -375,14 +421,37 @@ def _build_epoch_request(ctx: TrainExecutionContext) -> TrainEpochRequest:
     )
 
 
-def _run_training_epoch(ctx: TrainExecutionContext) -> tuple[float, float, dict]:
+def _run_training_epoch(ctx: TrainExecutionContext, do_validation: bool) -> tuple[float, float | None, dict | None]:
     train_loss = ctx.dependencies.train_one_epoch(request=_build_epoch_request(ctx))
+    if not do_validation:
+        return train_loss, None, None
     val_loss, val_bundle = ctx.dependencies.evaluate_with_predictions(ctx.model, ctx.loaders["val"], ctx.loss_fn, ctx.device)
     val_summary, _ = regression_metrics(val_bundle.y_true, val_bundle.y_pred, label_names=ctx.label_names)
     return train_loss, val_loss, val_summary
 
 
+def _should_validate_this_epoch(ctx: TrainExecutionContext, epoch: int) -> bool:
+    """val_every>1 时按间隔验证；epoch=1 / 最后 epoch 强制验证，保证有起止 baseline。"""
+    val_every = int(ctx.config["training"].get("val_every", 1))
+    if val_every <= 1:
+        return True
+    if epoch == 1 or epoch == ctx.total_epochs:
+        return True
+    return (epoch % val_every) == 0
+
+
+def _should_write_last_ckpt(ctx: TrainExecutionContext, epoch: int) -> bool:
+    """last_checkpoint_every>1 时按间隔写 last_checkpoint.pt；最后 epoch 强制写。"""
+    interval = int(ctx.config["training"].get("last_checkpoint_every", 1))
+    if interval <= 1:
+        return True
+    if epoch == ctx.total_epochs:
+        return True
+    return (epoch % interval) == 0
+
+
 def _record_epoch_result(ctx: TrainExecutionContext, epoch: int, result: EpochResult) -> None:
+    lr = ctx.optimizer.param_groups[0]["lr"]
     ctx.log_rows.append(
         {
             "epoch": epoch,
@@ -390,10 +459,15 @@ def _record_epoch_result(ctx: TrainExecutionContext, epoch: int, result: EpochRe
             "val_loss": result.val_loss,
             "val_macro_RMSE": result.monitor_value,
             "val_macro_MAE": result.val_macro_mae,
+            "val_mean_pred_sum": result.val_mean_pred_sum,
+            "val_mean_abs_sum_error": result.val_mean_abs_sum_error,
+            "val_std_pred_sum": result.val_std_pred_sum,
             "improved": result.improved,
+            "lr": lr,
+            "val_skipped": result.val_skipped,
         }
     )
-    if result.improved:
+    if result.improved and not result.val_skipped:
         torch.save(ctx.model.state_dict(), ctx.best_path)
         _save_run_checkpoint(ctx, ctx.best_ckpt_path, epoch, ctx.log_rows, "running")
     if ctx.progress is not None:
@@ -403,16 +477,20 @@ def _record_epoch_result(ctx: TrainExecutionContext, epoch: int, result: EpochRe
             train_loss=result.train_loss,
             val_loss=result.val_loss,
             val_macro_RMSE=result.monitor_value,
+            val_mean_pred_sum=result.val_mean_pred_sum,
+            val_mean_abs_sum_error=result.val_mean_abs_sum_error,
             improved=result.improved,
             best=ctx.stopper.best,
             bad_epochs=ctx.stopper.bad_epochs,
             patience=ctx.stopper.patience,
             epoch_seconds=result.epoch_seconds,
         )
-    _save_run_checkpoint(ctx, ctx.last_ckpt_path, epoch, ctx.log_rows, "running")
-    ctx.current_run_last_checkpoint_written = True
+    if _should_write_last_ckpt(ctx, epoch):
+        _save_run_checkpoint(ctx, ctx.last_ckpt_path, epoch, ctx.log_rows, "running")
+        ctx.current_run_last_checkpoint_written = True
     if ctx.options.checkpoint_every > 0 and epoch % ctx.options.checkpoint_every == 0:
         _save_run_checkpoint(ctx, ctx.output_dir / f"epoch_{epoch:04d}.pt", epoch, ctx.log_rows, "running")
+    # 跳过 val 的 epoch 用 monitor=NaN，plateau scheduler 会异常，需在配置中避开此组合
     _step_scheduler(ctx.scheduler, result.monitor_value)
 
 
@@ -430,16 +508,38 @@ def _run_training_epochs(ctx: TrainExecutionContext) -> bool:
     try:
         for epoch in range(ctx.start_epoch, ctx.total_epochs + 1):
             epoch_started = perf_counter()
-            train_loss, val_loss, val_summary = _run_training_epoch(ctx)
-            monitor_value = val_summary["macro_RMSE"]
-            result = EpochResult(
-                train_loss=train_loss,
-                val_loss=val_loss,
-                monitor_value=monitor_value,
-                val_macro_mae=val_summary["macro_MAE"],
-                improved=ctx.stopper.step(monitor_value),
-                epoch_seconds=perf_counter() - epoch_started,
-            )
+            do_val = _should_validate_this_epoch(ctx, epoch)
+            train_loss, val_loss, val_summary = _run_training_epoch(ctx, do_val)
+            if do_val and val_summary is not None:
+                monitor_value = val_summary["macro_RMSE"]
+                result = EpochResult(
+                    train_loss=train_loss,
+                    val_loss=val_loss,
+                    monitor_value=monitor_value,
+                    val_macro_mae=val_summary["macro_MAE"],
+                    val_mean_pred_sum=val_summary["mean_pred_sum"],
+                    val_mean_abs_sum_error=val_summary["mean_abs_sum_error"],
+                    val_std_pred_sum=val_summary["std_pred_sum"],
+                    improved=ctx.stopper.step(monitor_value),
+                    epoch_seconds=perf_counter() - epoch_started,
+                    val_skipped=False,
+                )
+            else:
+                # 跳过 val 的轮次：metric 写 NaN，stopper 不 step，bad_epochs 不累加；
+                # scheduler 仍 step（适配 cosine/cosine_warmup，plateau 不可用）
+                nan = float("nan")
+                result = EpochResult(
+                    train_loss=train_loss,
+                    val_loss=nan,
+                    monitor_value=nan,
+                    val_macro_mae=nan,
+                    val_mean_pred_sum=nan,
+                    val_mean_abs_sum_error=nan,
+                    val_std_pred_sum=nan,
+                    improved=False,
+                    epoch_seconds=perf_counter() - epoch_started,
+                    val_skipped=True,
+                )
             _record_epoch_result(ctx, epoch, result)
             if _should_pause_after_epoch(ctx, epoch):
                 return ctx.options.stop_after_epoch is not None and epoch >= ctx.options.stop_after_epoch

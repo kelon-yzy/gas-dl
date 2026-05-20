@@ -16,6 +16,7 @@ def build_common_summary(
     simulation_level,
     channel_names,
     shape,
+    split_policy="random_seed_grouped_by_mixture_id",
 ):
     """生成 V2/V3 共享的基础质量摘要 dict。
 
@@ -38,7 +39,7 @@ def build_common_summary(
         "calibration_status": "pending",
         "simulation_level": simulation_level,
         "shape": dict(shape),
-        "split_policy": "random_seed_grouped_by_mixture_id",
+        "split_policy": split_policy,
         "split_distribution": split_distribution,
         "split_warnings": split_warnings,
         "scaler_policy": "fit_z_score_scalers_on_train_split_only",

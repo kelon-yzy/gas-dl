@@ -40,7 +40,10 @@ class GRURegressor(nn.Module):
         )
         factor = 2 if bidirectional else 1
         self.head = nn.Sequential(
-            nn.Linear(hidden_size * factor, 64),
+            nn.Linear(hidden_size * factor, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, out_dim),

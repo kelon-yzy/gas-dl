@@ -32,7 +32,7 @@ def build_index_rows(conditions, timesteps, dt_s):
     return [
         {
             "sequence_id": row["sequence_id"],
-            "mixture_id": row["mixture_id"],
+            "mixture_id": row["sequence_id"],
             "stage_profile": "standard_exposure",  # 当前仅支持标准曝光时序
             "status": "synthetic_measurement",
             "n_timesteps": str(timesteps),

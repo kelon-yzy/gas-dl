@@ -15,26 +15,32 @@ data:
 model:
   name: cnn1d_multimodal
   slow_dim: 8
-  use_stage_one_hot: true
-  stage_dim: 4
   hidden_channels: [32, 64, 64]
   kernel_size: 5
-  dropout: 0.1
+  dropout: 0.2
+  temporal_pooling: mean_max
   out_dim: 4
 
 training:
-  epochs: 200
-  batch_size: 8
+  epochs: 120
+  batch_size: 32
   device: auto
+  amp: false
   optimizer: adamw
-  learning_rate: 0.001
+  learning_rate: 0.0003
   weight_decay: 0.01
   loss: mse
+  label_balanced_loss: false
+  sum_constraint:
+    weight: 0.1
+    target_sum: 100.0
+    penalty: mse
   early_stopping_patience: 25
-  num_workers: 2
-  eval_num_workers: 1
+  num_workers: 4
+  eval_num_workers: 2
   grad_clip_norm: 1.0
+  cudnn_benchmark: true
   lr_scheduler:
     type: cosine_warmup
-    warmup_epochs: 5
-    eta_min: 0.0001
+    warmup_epochs: 10
+    eta_min: 0.00003

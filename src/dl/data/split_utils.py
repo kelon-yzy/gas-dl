@@ -18,11 +18,15 @@ def load_existing_splits(split_dir: str | Path) -> dict[str, pd.DataFrame] | Non
     if not all(path.exists() for path in files.values()):
         return None
     splits = {name: pd.read_csv(path) for name, path in files.items()}
+    extrapolation_path = split_dir / "extrapolation_sequence_ids.csv"
+    if extrapolation_path.exists():
+        splits["extrapolation"] = pd.read_csv(extrapolation_path)
     for name, frame in splits.items():
+        source_path = files.get(name, extrapolation_path)
         if "sequence_id" not in frame.columns:
-            raise ValueError(f"Missing sequence_id column in {files[name]}")
-        if "mixture_id" not in frame.columns:
-            frame["mixture_id"] = frame["sequence_id"]
+            raise ValueError(f"Missing sequence_id column in {source_path}")
+        # 每条序列独立，不按 mixture_id 分组
+        frame["mixture_id"] = frame["sequence_id"]
     validate_group_splits(splits)
     return splits
 
@@ -36,7 +40,7 @@ def generate_group_splits(
 ) -> dict[str, pd.DataFrame]:
     if abs(train_size + val_size + test_size - 1.0) > 1e-6:
         raise ValueError("train_size + val_size + test_size must equal 1")
-    groups = metadata["mixture_id"].drop_duplicates().to_numpy()
+    groups = metadata["sequence_id"].drop_duplicates().to_numpy()
     train_groups, temp_groups = train_test_split(
         groups, train_size=train_size, random_state=seed, shuffle=True
     )
@@ -51,16 +55,18 @@ def generate_group_splits(
     }
     splits = {}
     for split, group_set in mapping.items():
-        splits[split] = metadata.loc[
-            metadata["mixture_id"].isin(group_set), ["sequence_id", "mixture_id"]
+        matched = metadata.loc[
+            metadata["sequence_id"].isin(group_set), ["sequence_id"]
         ].reset_index(drop=True)
+        matched["mixture_id"] = matched["sequence_id"]
+        splits[split] = matched
     validate_group_splits(splits)
     return splits
 
 
 def validate_group_splits(splits: dict[str, pd.DataFrame]) -> None:
     group_sets = {
-        name: set(frame["mixture_id"].astype(str).tolist()) for name, frame in splits.items()
+        name: set(frame["sequence_id"].astype(str).tolist()) for name, frame in splits.items()
     }
     for left in group_sets:
         for right in group_sets:
@@ -68,7 +74,7 @@ def validate_group_splits(splits: dict[str, pd.DataFrame]) -> None:
                 continue
             overlap = group_sets[left].intersection(group_sets[right])
             if overlap:
-                raise ValueError(f"mixture_id overlap between {left} and {right}: {sorted(overlap)[:5]}")
+                raise ValueError(f"sequence_id overlap between {left} and {right}: {sorted(overlap)[:5]}")
 
 
 def save_splits(splits: dict[str, pd.DataFrame], split_dir: str | Path) -> None:
@@ -93,9 +99,8 @@ def write_split_summary(splits: dict[str, pd.DataFrame], path: str | Path) -> No
     summary = {
         name: {
             "n_sequences": int(len(frame)),
-            "n_mixtures": int(frame["mixture_id"].nunique()),
+            "n_mixtures": int(frame["sequence_id"].nunique()),
         }
         for name, frame in splits.items()
     }
     Path(path).write_text(json.dumps(summary, indent=2), encoding="utf-8")
-

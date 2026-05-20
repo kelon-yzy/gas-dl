@@ -1,4 +1,6 @@
 import argparse
+import csv
+import json
 import random
 import sys
 from pathlib import Path
@@ -23,23 +25,24 @@ from scripts.acoustic_waveform_v3 import (
     simulate_waveform_measurement,
 )
 from scripts.acoustic_v2 import _hidden_sound_speed_v2
+from scripts.check_waveform_dataset_integrity import run_integrity_checks
 from scripts.generate_v1_dataset import PROCESSING_PARAMS, _generate_main_features
 from sim_common import (
+    STRATIFIED_GROUP_SPLIT_POLICY,
     FOUR_COMPONENT_LABEL_FIELDS,
     MULTI_PATH_PHASE_BASELINE,
     MULTI_PATH_PHASE_OFF,
     MULTI_PATH_PHASE_STEADY,
+    build_stratified_group_splits_with_extrapolation,
     build_common_summary,
     build_index_rows,
     build_label_rows,
-    build_split_rows,
     build_synthetic_condition_rows_four_component,
     collect_split_warnings,
     compute_split_distribution,
     fit_z_score_scalers,
     fmt,
     phase_boundaries,
-    split_mixture_ids,
     normalize_multi_path_phase,
     write_csv,
     write_json,
@@ -71,6 +74,9 @@ GENERATION_SEED = 20260514
 DEFAULT_NOISE_SEED_COUNT = 3
 WAVEFORM_PATH_LMS = (0.2, 0.6, 1.0, 1.4)
 SLOW_DYNAMIC_CHANNELS = ("V_NDIR_CH4", "V_NDIR_CO2", "V_TCS")
+DEFAULT_EXTRAPOLATION_RATIO = 0.15
+DEFAULT_BOUNDARY_QUANTILE = 0.10
+DEFAULT_STRATIFY_FIELDS_WAVEFORM = ("x_H2", "x_CO2", "x_N2", "P_MPa_base", "L_m_base")
 
 
 def generate_waveform_dataset(
@@ -123,8 +129,17 @@ def generate_waveform_dataset(
         multi_path_phase,
     )
 
-    train_ids, val_ids, test_ids = split_mixture_ids([row["mixture_id"] for row in conditions], seed=seed)
-    split_rows = build_split_rows(conditions, train_ids, val_ids, test_ids)
+    split_rows, split_summary = build_stratified_group_splits_with_extrapolation(
+        conditions,
+        group_field="sequence_id",
+        stratify_fields=DEFAULT_STRATIFY_FIELDS_WAVEFORM,
+        extrapolation_ratio=DEFAULT_EXTRAPOLATION_RATIO,
+        boundary_quantile=DEFAULT_BOUNDARY_QUANTILE,
+        train_ratio=0.70,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        seed=seed,
+    )
     train_sequence_ids = {row["sequence_id"] for row in split_rows["train"]}
     train_indexes = [index for index, sequence_id in enumerate(sequence_ids) if sequence_id in train_sequence_ids]
     slow_scaler, slow_modal_scaler = fit_z_score_scalers(
@@ -162,6 +177,8 @@ def generate_waveform_dataset(
     write_csv(paths["train_split"], ["sequence_id", "mixture_id"], split_rows["train"])
     write_csv(paths["val_split"], ["sequence_id", "mixture_id"], split_rows["val"])
     write_csv(paths["test_split"], ["sequence_id", "mixture_id"], split_rows["test"])
+    write_csv(paths["extrapolation_split"], ["sequence_id", "mixture_id"], split_rows["extrapolation"])
+    write_json(paths["split_summary"], split_summary)
 
     _write_waveform_metadata(
         paths,
@@ -207,6 +224,7 @@ def generate_waveform_dataset(
             base_condition_count=base_condition_count,
             noise_seed_count=noise_seed_count,
             multi_path_phase=multi_path_phase,
+            split_summary=split_summary,
         ),
     )
     paths["readme"].parent.mkdir(parents=True, exist_ok=True)
@@ -219,9 +237,11 @@ def generate_waveform_dataset(
             storage=storage,
             noise_seed_count=noise_seed_count,
             multi_path_phase=multi_path_phase,
+            split_summary=split_summary,
         ),
         encoding="utf-8",
     )
+    run_integrity_checks(output_dir, report_path=output_dir / "quality" / "waveform_integrity_report.json")
     return paths
 
 
@@ -246,6 +266,8 @@ def build_waveform_output_paths(output_dir):
         "train_split": output_dir / "splits" / "train_sequence_ids.csv",
         "val_split": output_dir / "splits" / "val_sequence_ids.csv",
         "test_split": output_dir / "splits" / "test_sequence_ids.csv",
+        "extrapolation_split": output_dir / "splits" / "extrapolation_sequence_ids.csv",
+        "split_summary": output_dir / "splits" / "split_summary.json",
         "scaler_slow_sequence": output_dir / "scalers" / "scaler_slow_sequence.json",
         "scaler_slow_sequence_modal": output_dir / "scalers" / "scaler_slow_sequence_modal.json",
         "quality_summary": output_dir / "quality" / "waveform_quality_summary.json",
@@ -273,6 +295,7 @@ def _waveform_sequence_condition_rows_four_component(sequence_count, rng, spec, 
         for noise_seed_index in range(noise_seed_count):
             row = dict(base_row)
             row["sequence_id"] = f"Q{sequence_index:06d}"
+            row["mixture_id"] = row["sequence_id"]
             row["base_condition_id"] = base_condition_id
             row["noise_seed_index"] = str(noise_seed_index)
             row["noise_seed"] = str(noise_seed_index)
@@ -604,6 +627,7 @@ def _waveform_quality_summary(
     base_condition_count,
     noise_seed_count,
     multi_path_phase,
+    split_summary,
 ):
     summary = build_common_summary(
         sequence_ids=sequence_ids,
@@ -622,6 +646,7 @@ def _waveform_quality_summary(
             "slow_channels": len(SLOW_CHANNELS),
             "labels": len(FOUR_COMPONENT_LABEL_FIELDS),
         },
+        split_policy=split_summary["split_policy"],
     )
     summary["acoustic_version"] = DATASET_VERSION
     summary["ultrasonic"] = {
@@ -659,6 +684,7 @@ def _waveform_quality_summary(
         "slow": "sequences/slow.npy",
         "y": "labels/y.npy",
     }
+    summary["split_summary"] = split_summary
     summary["spec"] = {
         "ultrasonic": ultrasonic_spec.to_dict(),
         "fiber_mic": fiber_mic_spec.to_dict(),
@@ -666,12 +692,14 @@ def _waveform_quality_summary(
     return summary
 
 
-def _waveform_readme(sequence_count, base_condition_count, timesteps, split_distribution, storage, noise_seed_count, multi_path_phase):
+def _waveform_readme(sequence_count, base_condition_count, timesteps, split_distribution, storage, noise_seed_count, multi_path_phase, split_summary):
     rows = [
         "| split | sequence_count | mixture_count |",
         "| --- | ---: | ---: |",
     ]
-    for split_name in ("train", "val", "test"):
+    for split_name in ("train", "val", "test", "extrapolation"):
+        if split_name not in split_distribution:
+            continue
         stats = split_distribution[split_name]
         rows.append(f"| {split_name} | {stats['sequence_count']} | {stats['mixture_count']} |")
     split_table = "\n".join(rows)
@@ -681,6 +709,7 @@ def _waveform_readme(sequence_count, base_condition_count, timesteps, split_dist
 dataset_version: {DATASET_VERSION_LABEL}
 calibration_status: pending
 simulation_level: dual_waveform_dynamic_simulation
+split_policy: {split_summary["split_policy"]}
 storage_format: {storage}
 sequences: {sequence_count}
 base_conditions: {base_condition_count}
@@ -721,6 +750,8 @@ waveform_v3/
     train_sequence_ids.csv
     val_sequence_ids.csv
     test_sequence_ids.csv
+    extrapolation_sequence_ids.csv
+    split_summary.json
   scalers/
     scaler_slow_sequence.json
     scaler_slow_sequence_modal.json
@@ -729,7 +760,122 @@ waveform_v3/
 ```
 
 {split_table}
+
+边界外推样本比例（目标）: {split_summary["extrapolation_ratio_target"]:.2f}
 """
+
+
+def _load_existing_conditions(path):
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _base_condition_count(conditions):
+    if not conditions:
+        return 0
+    if "base_condition_id" in conditions[0]:
+        return len({row["base_condition_id"] for row in conditions})
+    return len({row["mixture_id"] for row in conditions})
+
+
+def rebuild_waveform_split_artifacts(
+    output_dir,
+    *,
+    seed=GENERATION_SEED,
+):
+    output_dir = Path(output_dir)
+    paths = build_waveform_output_paths(output_dir)
+    conditions = _load_existing_conditions(paths["condition_grid_sequence"])
+    if not conditions:
+        raise ValueError(f"No rows found in {paths['condition_grid_sequence']}")
+
+    spec = json.loads(paths["waveform_v3_spec"].read_text(encoding="utf-8"))
+    ultrasonic_spec = WaveformV3Spec(
+        **{key: value for key, value in spec["channels"]["ultrasonic"].items() if key != "waveform_samples"}
+    )
+    fiber_mic_spec = FiberMicV3Spec(
+        **{key: value for key, value in spec["channels"]["fiber_mic"].items() if key != "waveform_samples"}
+    )
+    timesteps = int(spec["timesteps"])
+    dt_s = float(spec["dt_s"])
+    noise_seed_count = int(spec.get("noise_seed_count", DEFAULT_NOISE_SEED_COUNT))
+    multi_path_phase = spec.get("multi_path_phase", MULTI_PATH_PHASE_STEADY)
+    sequence_ids = [str(value) for value in np.load(paths["sequence_ids_npy"], allow_pickle=True)]
+    # rebuild 时也需确保 conditions 中 mixture_id = sequence_id
+    for cond in conditions:
+        cond["mixture_id"] = cond["sequence_id"]
+    split_rows, split_summary = build_stratified_group_splits_with_extrapolation(
+        conditions,
+        group_field="sequence_id",
+        stratify_fields=DEFAULT_STRATIFY_FIELDS_WAVEFORM,
+        extrapolation_ratio=DEFAULT_EXTRAPOLATION_RATIO,
+        boundary_quantile=DEFAULT_BOUNDARY_QUANTILE,
+        train_ratio=0.70,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        seed=seed,
+    )
+
+    write_csv(paths["train_split"], ["sequence_id", "mixture_id"], split_rows["train"])
+    write_csv(paths["val_split"], ["sequence_id", "mixture_id"], split_rows["val"])
+    write_csv(paths["test_split"], ["sequence_id", "mixture_id"], split_rows["test"])
+    write_csv(paths["extrapolation_split"], ["sequence_id", "mixture_id"], split_rows["extrapolation"])
+    write_json(paths["split_summary"], split_summary)
+
+    train_sequence_ids = {row["sequence_id"] for row in split_rows["train"]}
+    lookup = {sequence_id: index for index, sequence_id in enumerate(sequence_ids)}
+    train_indexes = [lookup[sequence_id] for sequence_id in sequence_ids if sequence_id in train_sequence_ids]
+    slow = np.load(paths["slow_npy"], mmap_mode="r")
+    slow_scaler, slow_modal_scaler = fit_z_score_scalers(
+        slow,
+        train_indexes,
+        channel_names=SLOW_CHANNELS,
+        modal_groups=SLOW_MODAL_GROUPS,
+        transform_target="slow",
+    )
+    write_json(paths["scaler_slow_sequence"], slow_scaler)
+    write_json(paths["scaler_slow_sequence_modal"], slow_modal_scaler)
+
+    split_distribution = compute_split_distribution(conditions, split_rows, FOUR_COMPONENT_LABEL_FIELDS)
+    split_warnings = collect_split_warnings(split_distribution, FOUR_COMPONENT_LABEL_FIELDS)
+    base_condition_count = _base_condition_count(conditions)
+    write_json(
+        paths["quality_summary"],
+        _waveform_quality_summary(
+            sequence_ids=sequence_ids,
+            timesteps=timesteps,
+            split_distribution=split_distribution,
+            split_warnings=split_warnings,
+            storage="memmap",
+            ultrasonic_spec=ultrasonic_spec,
+            fiber_mic_spec=fiber_mic_spec,
+            base_condition_count=base_condition_count,
+            noise_seed_count=noise_seed_count,
+            multi_path_phase=multi_path_phase,
+            split_summary=split_summary,
+        ),
+    )
+    paths["readme"].write_text(
+        _waveform_readme(
+            sequence_count=len(sequence_ids),
+            base_condition_count=base_condition_count,
+            timesteps=timesteps,
+            split_distribution=split_distribution,
+            storage="memmap",
+            noise_seed_count=noise_seed_count,
+            multi_path_phase=multi_path_phase,
+            split_summary=split_summary,
+        ),
+        encoding="utf-8",
+    )
+    integrity_report = run_integrity_checks(output_dir, report_path=output_dir / "quality" / "waveform_integrity_report.json")
+    return {
+        "split_summary_path": str(paths["split_summary"]),
+        "quality_summary_path": str(paths["quality_summary"]),
+        "readme_path": str(paths["readme"]),
+        "integrity_report_path": str(output_dir / "quality" / "waveform_integrity_report.json"),
+        "integrity_status": integrity_report["status"],
+    }
 
 
 def main():
@@ -741,7 +887,12 @@ def main():
     parser.add_argument("--storage", choices=sorted(VALID_STORAGE_FORMATS), default="memmap")
     parser.add_argument("--noise-seed-count", type=int, default=DEFAULT_NOISE_SEED_COUNT)
     parser.add_argument("--multi-path-phase", choices=[MULTI_PATH_PHASE_OFF, MULTI_PATH_PHASE_BASELINE, MULTI_PATH_PHASE_STEADY], default=MULTI_PATH_PHASE_STEADY)
+    parser.add_argument("--rebuild-splits-only", action="store_true")
     args = parser.parse_args()
+    if args.rebuild_splits_only:
+        result = rebuild_waveform_split_artifacts(args.output_dir, seed=args.seed)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
     generate_waveform_dataset(
         args.output_dir,
         sequence_count=args.sequence_count,

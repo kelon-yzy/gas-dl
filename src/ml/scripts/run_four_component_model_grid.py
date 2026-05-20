@@ -82,6 +82,19 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max-workers", type=positive_int, default=1)
   parser.add_argument("--ui", action="store_true")
   parser.add_argument("--no-ui", action="store_true")
+  parser.add_argument("--split-dir", default=None, help="可选：DL split 目录，按 mixture_id 复用切分。")
+  parser.add_argument(
+    "--split-include-val-in-train",
+    action="store_true",
+    default=True,
+    help="使用 split-dir 时把 val mixture 并入训练集（默认开启）。",
+  )
+  parser.add_argument(
+    "--no-split-include-val-in-train",
+    dest="split_include_val_in_train",
+    action="store_false",
+    help="使用 split-dir 时不把 val mixture 并入训练集。",
+  )
   add_model_args(parser, positive_int)
   return parser
 
@@ -142,6 +155,8 @@ def _build_train_args(args: argparse.Namespace, profile: str, branch_model_type:
   train_args.duplicate_filter = args.duplicate_filter
   train_args.duplicate_per_mixture_limit = args.duplicate_per_mixture_limit
   train_args.duplicate_filter_seed = args.duplicate_filter_seed
+  train_args.split_dir = getattr(args, "split_dir", None)
+  train_args.split_include_val_in_train = getattr(args, "split_include_val_in_train", True)
   return train_args
 
 

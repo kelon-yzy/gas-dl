@@ -28,7 +28,6 @@ class MultimodalWrapperModelTests(unittest.TestCase):
             "fiber_mic": torch.randint(0, 32768, (B, T, fiber_mic_len), dtype=torch.int16),
             "fiber_mic_scale": torch.rand(B, T),
             "slow": torch.randn(B, T, slow_dim),
-            "stage_one_hot": torch.nn.functional.one_hot(torch.arange(T).repeat(B, 1) % 4, num_classes=4).to(torch.float32),
         }
 
     def _forward_model(self, model_name: str, batch: dict) -> torch.Tensor:
@@ -61,7 +60,6 @@ class MultimodalWrapperModelTests(unittest.TestCase):
                 batch["fiber_mic"],
                 batch["fiber_mic_scale"],
                 batch["slow"],
-                stage_one_hot=batch.get("stage_one_hot"),
             )
 
     def test_cnn1d_multimodal_output_shape(self):
@@ -69,6 +67,64 @@ class MultimodalWrapperModelTests(unittest.TestCase):
         batch = self._make_batch()
         out = self._forward_model("cnn1d_multimodal", batch)
         self.assertEqual(out.shape, (4, 4), f"cnn1d_multimodal 输出形状错误: {out.shape}")
+
+    def test_cnn1d_multimodal_defaults_to_mean_max_temporal_pooling(self):
+        """cnn1d_multimodal 默认开启 mean_max 末端池化，保留跨时间步峰值响应。"""
+        model = build_model({"name": "cnn1d_multimodal", "slow_dim": 8, "hidden_channels": [32, 64, 64], "out_dim": 4})
+        self.assertEqual(model.backbone.temporal_pooling, "mean_max")
+
+    def test_plain_cnn1d_defaults_to_avg_temporal_pooling(self):
+        """纯慢变量 cnn1d 保持原有 avg 默认值，不受多模态改造影响。"""
+        model = build_model({"name": "cnn1d", "in_channels": 12, "hidden_channels": [32, 64, 64], "out_dim": 4})
+        self.assertEqual(model.temporal_pooling, "avg")
+
+    def test_cnn1d_multimodal_explicit_avg_temporal_pooling_forward(self):
+        """显式覆盖为 avg 时，多模态 CNN1D 仍可正常前向。"""
+        batch = self._make_batch()
+        model = build_model(
+            {
+                "name": "cnn1d_multimodal",
+                "slow_dim": 8,
+                "hidden_channels": [32, 64, 64],
+                "out_dim": 4,
+                "temporal_pooling": "avg",
+            }
+        )
+        model.eval()
+        with torch.no_grad():
+            out = model(
+                batch["ultrasonic"],
+                batch["ultrasonic_scale"],
+                batch["fiber_mic"],
+                batch["fiber_mic_scale"],
+                batch["slow"],
+            )
+        self.assertEqual(out.shape, (4, 4))
+
+    def test_invalid_temporal_pooling_raises_value_error(self):
+        """非法池化策略必须报错，避免实验配置被静默接受。"""
+        with self.assertRaisesRegex(ValueError, "median"):
+            build_model(
+                {
+                    "name": "cnn1d_multimodal",
+                    "slow_dim": 8,
+                    "hidden_channels": [32, 64, 64],
+                    "out_dim": 4,
+                    "temporal_pooling": "median",
+                }
+            )
+
+    def test_mean_max_temporal_pooling_doubles_head_input_dim(self):
+        """mean_max 时 head 输入维度应翻倍，避免 pooled feature 静默错配。"""
+        model = build_model(
+            {
+                "name": "cnn1d_multimodal",
+                "slow_dim": 8,
+                "hidden_channels": [32, 64],
+                "out_dim": 4,
+            }
+        )
+        self.assertEqual(model.backbone.head[0].in_features, 128)
 
     def test_gru_multimodal_output_shape(self):
         batch = self._make_batch()
@@ -162,39 +218,24 @@ class MultimodalWrapperModelTests(unittest.TestCase):
         # fused_dim = 8 + 64*1 = 72
         self.assertEqual(model.backbone.encoder[0].in_channels, 72)
 
-    def test_fused_dim_includes_stage_one_hot_when_enabled(self):
-        """开启阶段 one-hot 后 fused_dim 额外增加 4。"""
-        model = _build_multimodal(
-            CNN1DRegressor,
-            slow_dim=8,
-            hidden_channels=[32, 64],
-            out_dim=4,
-            use_stage_one_hot=True,
-            stage_dim=4,
-        )
-        self.assertEqual(model.backbone.encoder[0].in_channels, 140)
+    def test_cnn1d_multimodal_fused_dim_without_stage_one_hot(self):
+        """CNN1D 双分支 fused_dim = slow_dim + waveform_embedding_dim * 2 = 136。"""
+        model = _build_multimodal(CNN1DRegressor, slow_dim=8, hidden_channels=[32, 64], out_dim=4)
+        # fused_dim = 8 + 64*2 = 136
+        self.assertEqual(model.backbone.encoder[0].in_channels, 136)
 
-    def test_cnn1d_multimodal_accepts_stage_one_hot(self):
-        """cnn1d_multimodal 开启阶段 one-hot 后可正常前向。"""
-        cfg = {
-            "name": "cnn1d_multimodal",
-            "slow_dim": 8,
-            "hidden_channels": [32, 64, 64],
-            "out_dim": 4,
-            "use_stage_one_hot": True,
-            "stage_dim": 4,
-        }
-        model = build_model(cfg)
-        model.eval()
+    def test_waveform_batch_no_stage_one_hot_key(self):
+        """waveform 正式数据流不再包含 stage_one_hot 字段。"""
         batch = self._make_batch()
+        self.assertNotIn("stage_one_hot", batch)
+        # 确认前向不需要 stage_one_hot
+        model = build_model({"name": "cnn1d_multimodal", "slow_dim": 8, "hidden_channels": [32, 64, 64], "out_dim": 4})
+        model.eval()
         with torch.no_grad():
             out = model(
-                batch["ultrasonic"],
-                batch["ultrasonic_scale"],
-                batch["fiber_mic"],
-                batch["fiber_mic_scale"],
+                batch["ultrasonic"], batch["ultrasonic_scale"],
+                batch["fiber_mic"], batch["fiber_mic_scale"],
                 batch["slow"],
-                stage_one_hot=batch["stage_one_hot"],
             )
         self.assertEqual(out.shape, (4, 4))
 
@@ -210,6 +251,17 @@ class MultimodalWrapperModelTests(unittest.TestCase):
                     "dropouut": 0.1,
                 }
             )
+
+    def test_stage_one_hot_config_raises_value_error(self):
+        """use_stage_one_hot 配置项已移除，传入应报未知配置项错误。"""
+        with self.assertRaisesRegex(ValueError, "use_stage_one_hot"):
+            build_model({
+                "name": "cnn1d_multimodal",
+                "slow_dim": 8,
+                "hidden_channels": [32, 64, 64],
+                "out_dim": 4,
+                "use_stage_one_hot": True,
+            })
 
     def test_waveform_dropout_propagated_to_encoder(self):
         """waveform_dropout 应传入 AcousticWaveformEncoder，控制编码器 Dropout 概率。"""

@@ -33,6 +33,11 @@ from .phases import phase_boundaries, phase_for_timestep
 from .quality import build_common_summary
 from .scalers import fit_z_score_scalers
 from .splits import (
+    ALL_SPLIT_NAMES,
+    CORE_SPLIT_NAMES,
+    DEFAULT_STRATIFY_FIELDS,
+    STRATIFIED_GROUP_SPLIT_POLICY,
+    build_stratified_group_splits_with_extrapolation,
     build_split_rows,
     collect_split_warnings,
     compute_split_distribution,
@@ -40,6 +45,9 @@ from .splits import (
 )
 
 __all__ = [
+    "ALL_SPLIT_NAMES",
+    "CORE_SPLIT_NAMES",
+    "DEFAULT_STRATIFY_FIELDS",
     "BASELINE_PATH_LMS",
     "FOUR_COMPONENT_CH4_MIN",
     "FOUR_COMPONENT_LABEL_FIELDS",
@@ -48,6 +56,8 @@ __all__ = [
     "MULTI_PATH_PHASE_CHOICES",
     "MULTI_PATH_PHASE_OFF",
     "MULTI_PATH_PHASE_STEADY",
+    "STRATIFIED_GROUP_SPLIT_POLICY",
+    "build_stratified_group_splits_with_extrapolation",
     "build_common_summary",
     "build_index_rows",
     "build_label_rows",

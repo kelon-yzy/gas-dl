@@ -41,16 +41,34 @@ def select_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def make_loader(dataset, batch_size: int, shuffle: bool, device: torch.device | None = None, num_workers: int = 0):
+def configure_cudnn(training_config: dict, device: torch.device) -> None:
+    """按配置开启 cuDNN benchmark。模型输入形状固定时可加速 5-15%。"""
+    if device.type != "cuda":
+        return
+    if bool(training_config.get("cudnn_benchmark", False)):
+        torch.backends.cudnn.benchmark = True
+
+
+def make_loader(
+    dataset,
+    batch_size: int,
+    shuffle: bool,
+    device: torch.device | None = None,
+    num_workers: int = 0,
+    prefetch_factor: int | None = None,
+):
     pin_memory = device is not None and device.type == "cuda"
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
-    )
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": num_workers > 0,
+    }
+    # prefetch_factor 在 num_workers=0 下传入会报错，仅多 worker 场景启用
+    if num_workers > 0 and prefetch_factor is not None and prefetch_factor > 0:
+        kwargs["prefetch_factor"] = int(prefetch_factor)
+    return DataLoader(dataset, **kwargs)
 
 
 def _is_waveform_batch(batch) -> bool:
@@ -81,8 +99,6 @@ def _move_waveform_batch(batch: dict, device: torch.device) -> dict:
         "target": _move_tensor(batch["target"], device),
         "meta": batch["meta"],
     }
-    if "stage_one_hot" in batch:
-        moved["stage_one_hot"] = _move_tensor(batch["stage_one_hot"], device)
     return moved
 
 
@@ -96,7 +112,6 @@ def _forward_batch(model, batch, device):
                 moved["fiber_mic"],
                 moved["fiber_mic_scale"],
                 moved["slow"],
-                stage_one_hot=moved.get("stage_one_hot"),
             )
         else:
             slow_input = moved["slow"]

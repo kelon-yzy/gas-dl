@@ -57,7 +57,10 @@ class TCNRegressor(nn.Module):
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
-            nn.Linear(current, 64),
+            nn.Linear(current, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, out_dim),

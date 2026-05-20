@@ -36,6 +36,19 @@ def main() -> None:
     parser.add_argument("--stage-filter", default="stable", choices=("none", "stable"))
     parser.add_argument("--ui", action="store_true")
     parser.add_argument("--no-ui", action="store_true")
+    parser.add_argument("--split-dir", default=None, help="可选：DL split 目录，按 mixture_id 复用切分。")
+    parser.add_argument(
+        "--split-include-val-in-train",
+        action="store_true",
+        default=True,
+        help="使用 split-dir 时把 val mixture 并入训练集（默认开启）。",
+    )
+    parser.add_argument(
+        "--no-split-include-val-in-train",
+        dest="split_include_val_in_train",
+        action="store_false",
+        help="使用 split-dir 时不把 val mixture 并入训练集。",
+    )
     args = parser.parse_args()
 
     progress = build_cli_progress(force=args.ui, disable=args.no_ui)
@@ -74,6 +87,10 @@ def main() -> None:
         argv.extend(["--n-perturbations", str(args.n_perturbations)])
     if args.stacking_folds is not None:
         argv.extend(["--stacking-folds", str(args.stacking_folds)])
+    if args.split_dir is not None:
+        argv.extend(["--split-dir", args.split_dir])
+    if not args.split_include_val_in_train:
+        argv.append("--no-split-include-val-in-train")
     if args.ui:
         argv.append("--ui")
     if args.no_ui:

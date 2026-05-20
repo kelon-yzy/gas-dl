@@ -5,18 +5,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
 from data.channel_groups import resolve_time_indices
 from data.dataset_v2 import _to_str_list, load_sequence_metadata
-
-SIM_ROOT = Path(__file__).resolve().parents[2] / "sim"
-if str(SIM_ROOT) not in sys.path:
-    sys.path.insert(0, str(SIM_ROOT))
-
-from sim_common.phases import phase_boundaries
 
 
 EXPECTED_SLOW_CHANNEL_NAMES = [
@@ -32,25 +28,12 @@ EXPECTED_SLOW_CHANNEL_NAMES = [
 EXPECTED_WAVEFORM_LABEL_NAMES = ["x_H2", "x_CH4", "x_CO2", "x_N2"]
 DEFAULT_ULTRASONIC_SAMPLES = 1000
 DEFAULT_FIBER_MIC_SAMPLES = 2000
-DEFAULT_STAGE_DIM = 4
 
 
 def _to_tensor_ready_array(array: np.ndarray, dtype) -> np.ndarray:
     if array.dtype != dtype or not array.flags.c_contiguous or not array.flags.writeable:
         return np.array(array, dtype=dtype, copy=True)
     return array
-
-
-def _build_stage_one_hot(total_timesteps: int, time_indices: list[int] | None, stage_dim: int = DEFAULT_STAGE_DIM) -> np.ndarray:
-    if stage_dim != DEFAULT_STAGE_DIM:
-        raise ValueError(f"Expected stage_dim == {DEFAULT_STAGE_DIM}, got {stage_dim}")
-    q1, q2, q3 = phase_boundaries(total_timesteps)
-    positions = np.arange(total_timesteps, dtype=np.int64) if time_indices is None else np.asarray(time_indices, dtype=np.int64)
-    stage_ids = np.zeros(positions.shape[0], dtype=np.int64)
-    stage_ids[positions >= q1] = 1
-    stage_ids[positions >= q2] = 2
-    stage_ids[positions >= q3] = 3
-    return np.eye(stage_dim, dtype=np.float32)[stage_ids]
 
 
 def _load_waveform_sequence_ids(path: str | Path) -> list[str]:
@@ -203,7 +186,6 @@ class WaveformSequenceDataset(Dataset):
         self.y = None
         self.metadata = None
         self.total_timesteps = None
-        self.stage_dim = DEFAULT_STAGE_DIM
         if preloaded_data is not None:
             validate_waveform_arrays(
                 preloaded_data["ultrasonic"],
@@ -268,7 +250,6 @@ class WaveformSequenceDataset(Dataset):
         fiber_mic_scale = self.fiber_mic_scale[source_idx]
         slow = self.slow[source_idx]
         target = self.y[source_idx]
-        stage_one_hot = _build_stage_one_hot(int(self.total_timesteps), self.time_indices, stage_dim=self.stage_dim)
 
         if self.time_indices is not None:
             ultrasonic = ultrasonic[self.time_indices, :]
@@ -286,7 +267,6 @@ class WaveformSequenceDataset(Dataset):
         fiber_mic_scale = _to_tensor_ready_array(fiber_mic_scale, np.float32)
         slow = _to_tensor_ready_array(slow, np.float32)
         target = _to_tensor_ready_array(target, np.float32)
-        stage_one_hot = _to_tensor_ready_array(stage_one_hot, np.float32)
 
         meta = self.metadata.iloc[source_idx].to_dict()
         meta["sample_id"] = self.sequence_ids[source_idx]
@@ -296,7 +276,6 @@ class WaveformSequenceDataset(Dataset):
             "fiber_mic": torch.from_numpy(fiber_mic),
             "fiber_mic_scale": torch.from_numpy(fiber_mic_scale),
             "slow": torch.from_numpy(slow),
-            "stage_one_hot": torch.from_numpy(stage_one_hot),
             "target": torch.from_numpy(target),
             "meta": meta,
         }

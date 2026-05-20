@@ -2,6 +2,8 @@
 
 > 实验日期：2026-05-17 | 数据集：waveform_v3（10,000 序列，每序列 120 时间步）
 
+> ⚠️ **2026-05-19 数据集说明**：本文档全部结果基于旧 `data/waveform_v3/`（10000 序列，旧 mixture group 随机切）。新数据集 `data/waveform_v3_seedpath_formal/`（30000 序列、4 路 split + extrapolation holdout）已完成 DL 端 `cnn1d_tcn_fusion` 与 ML 全套传统模型的适配（见 [`waveform_v3_seedpath_formal_适配说明.md`](./waveform_v3_seedpath_formal_适配说明.md)），但表格里的 macro-RMSE 数字尚未在新数据集上重跑。重跑完成前，下文表格仅适用于旧数据集口径。新旧数据集的 mixture_id 命名空间不同，不能直接合并指标。
+
 ## 1 结果总览
 
 ### 1.1 全模型排名（按 macro-RMSE 升序）
@@ -169,3 +171,18 @@
 | 训练样本 | 9,587 vs 7,028（+36%） |
 
 深度学习的端到端方案在**几乎零特征工程、输入信息远少于传统 ML** 的条件下达到了可比性能。这说明模型架构（AcousticWaveformEncoder + multimodal fusion）是有效的，当前差距主要来自特征信息的不对称和训练数据的规模差距，而非模型架构的根本缺陷。
+
+---
+
+## 5 历史实验说明
+
+### 5.1 stage_one_hot 方案回退
+
+cnn1d_multimodal 曾实验过 `stage_one_hot` 方案：将实验阶段（baseline/exposure/steady/recovery）编码为 4 维 one-hot 向量，作为额外输入注入模型。尝试了两种注入方式：
+
+- **浅层拼接**：与 slow 变量在输入层拼接，使 `in_channels` 从 136 增至 140
+- **深层注入**：通过 `extra_dim` 在 global pooling 之后注入 head 层
+
+实验结果表明：该方案未带来 macro_RMSE 改善（甚至略有退化），同时增加了训练复杂度和参数量。已从正式架构中移除，相关代码路径已清理。
+
+> 上表中 cnn1d_multimodal 的 `0.765` 结果来自含 `stage_one_hot` 的历史训练，待单次正式训练完成后将以新结果替换。

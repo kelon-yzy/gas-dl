@@ -9,6 +9,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "sim"))
+sys.modules.pop("scripts", None)
 
 from scripts.generate_waveform_dataset import generate_waveform_dataset
 from sim_common.phases import phase_boundaries

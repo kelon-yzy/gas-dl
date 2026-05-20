@@ -1,0 +1,52 @@
+run:
+  name: v3_cnn1d_tcn_fusion_seed42_run_c
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e_tuned/run_c/v3_cnn1d_tcn_fusion_seed42_run_c
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_tcn_fusion
+  slow_dim: 8
+  waveform_embedding_dim: 48
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  tcn_channels: [64, 64, 64]
+  tcn_kernel_size: 3
+  tcn_dropout: 0.25
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+
+training:
+  epochs: 120
+  batch_size: 32
+  device: auto
+  amp: false
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: true
+  sum_constraint:
+    weight: 0.4
+    target_sum: 100.0
+    penalty: mae
+  early_stopping_patience: 12
+  num_workers: 4
+  eval_num_workers: 2
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: plateau
+    gamma: 0.5
+    patience: 4

@@ -15,19 +15,32 @@ data:
 model:
   name: lstm_multimodal
   slow_dim: 8
-  hidden_size: 64
-  num_layers: 1
-  bidirectional: false
-  dropout: 0.1
+  hidden_size: 96
+  num_layers: 2
+  bidirectional: true
+  dropout: 0.2
   out_dim: 4
 
 training:
-  epochs: 200
-  batch_size: 8
+  epochs: 120
+  batch_size: 32
   device: auto
-  learning_rate: 0.001
-  weight_decay: 0.0001
+  amp: false
+  optimizer: adamw
+  learning_rate: 0.0003
+  weight_decay: 0.01
   loss: mse
+  label_balanced_loss: true
+  sum_constraint:
+    weight: 0.1
+    target_sum: 100.0
+    penalty: mse
   early_stopping_patience: 25
-  num_workers: 2
-  eval_num_workers: 1
+  num_workers: 4
+  eval_num_workers: 2
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 10
+    eta_min: 0.00003

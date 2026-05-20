@@ -6,6 +6,11 @@ import torch
 from torch import nn
 
 
+# int16 ADC 满量程常数：与 src/sim/scripts/acoustic_waveform_v3.py 的 ADC_MAX_INT16 对齐。
+# 用作"波形形状"的归一化分母——固定常量、与样本无关，BN 不会因为它而被绕过。
+_ADC_MAX_INT16: float = 32767.0
+
+
 class AcousticWaveformEncoder(nn.Module):
     def __init__(self, embedding_dim: int = 64, dropout: float = 0.1):
         super().__init__()
@@ -26,8 +31,10 @@ class AcousticWaveformEncoder(nn.Module):
         )
         self.avg_pool = nn.AdaptiveAvgPool1d(1)
         self.max_pool = nn.AdaptiveMaxPool1d(1)
+        # projection 输入 = [avg(64) || max(64) || log(scale_factor) 标量] = 129 维。
+        # 把绝对幅值信号以独立标量送进线性层，避免被任何 per-sample 归一化抹掉。
         self.projection = nn.Sequential(
-            nn.Linear(64 * 2, embedding_dim),
+            nn.Linear(64 * 2 + 1, embedding_dim),
             nn.LayerNorm(embedding_dim),
             nn.Dropout(dropout),
         )
@@ -40,12 +47,16 @@ class AcousticWaveformEncoder(nn.Module):
         if waveform_int16.shape[0] != scale_factor.shape[0]:
             raise ValueError("batch size mismatch between waveform_int16 and scale_factor")
 
-        # 波形编码器强制 FP32：int16 转 float32 + scale_factor 乘法在 FP16 下易梯度 underflow
+        # 波形编码器强制 FP32：int16 转 float32、除常量、对数运算在 FP16 下数值范围易越界。
         with torch.amp.autocast(device_type=waveform_int16.device.type, enabled=False) if waveform_int16.device.type == "cuda" else nullcontext():
-            waveform = waveform_int16.to(torch.float32) * scale_factor.unsqueeze(1)
+            # 方案 B：用固定常数 ADC 满量程归一化，把波形形状压到 [-1, 1]；
+            # 不再 * scale_factor、不再 per-sample zscore，绝对幅值改走 log_scale 标量旁路。
+            waveform = waveform_int16.to(torch.float32) / _ADC_MAX_INT16
             x = self.features(waveform.unsqueeze(1))
             avg = self.avg_pool(x).squeeze(-1)
             mx = self.max_pool(x).squeeze(-1)
-            x = torch.cat([avg, mx], dim=1)
+            # log(scale_factor) 携带"本帧物理电压幅值"信号；clamp_min 防御退化输入（sim 已保证正数）。
+            log_scale = torch.log(scale_factor.to(torch.float32).clamp_min(1e-12)).unsqueeze(-1)
+            x = torch.cat([avg, mx, log_scale], dim=1)
             x = self.projection(x)
         return x

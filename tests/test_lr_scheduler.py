@@ -4,11 +4,13 @@ import unittest
 from pathlib import Path
 
 import torch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "dl"))
 
 from models.registry import build_model
+from training.orchestrator import _prepare_scheduler
 
 
 class LRSchedulerTests(unittest.TestCase):
@@ -25,6 +27,8 @@ class LRSchedulerTests(unittest.TestCase):
         lrs = []
         for epoch in range(200):
             lrs.append(optimizer.param_groups[0]["lr"])
+            # 真实训练中应先 optimizer.step() 再 scheduler.step()，避免跳过第一个 LR 值
+            optimizer.step()
             scheduler.step()
         # warmup: LR 从 ~0 递增到 1e-3
         self.assertLess(lrs[0], 1e-6)
@@ -79,7 +83,6 @@ class LRSchedulerTests(unittest.TestCase):
 
     def test_cnn1d_multimodal_config_has_adamw_and_scheduler(self):
         """CNN1D multimodal 配置文件包含 optimizer=adamw 和 lr_scheduler。"""
-        import yaml
         config_path = ROOT / "configs" / "deep" / "slow_only_cnn1d_multimodal_formal.yaml"
         with config_path.open("r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
@@ -88,8 +91,8 @@ class LRSchedulerTests(unittest.TestCase):
         self.assertEqual(config["training"]["grad_clip_norm"], 1.0)
         self.assertIsNotNone(config["training"].get("lr_scheduler"))
         self.assertEqual(config["training"]["lr_scheduler"]["type"], "cosine_warmup")
-        self.assertEqual(config["training"]["lr_scheduler"]["warmup_epochs"], 5)
-        self.assertEqual(config["training"]["lr_scheduler"]["eta_min"], 0.0001)
+        self.assertEqual(config["training"]["lr_scheduler"]["warmup_epochs"], 10)
+        self.assertEqual(config["training"]["lr_scheduler"]["eta_min"], 0.00003)
 
     def test_backward_compatible_config_without_scheduler(self):
         """旧配置（无 optimizer/lr_scheduler/grad_clip_norm）仍然可运行。"""
@@ -101,6 +104,51 @@ class LRSchedulerTests(unittest.TestCase):
         self.assertIsNone(config["training"].get("optimizer"))  # 默认 adam
         self.assertIsNone(config["training"].get("lr_scheduler"))  # 默认 None
         self.assertIsNone(config["training"].get("grad_clip_norm"))  # 默认 0.0
+
+    def test_plateau_scheduler_reduces_lr_after_stall(self):
+        model = torch.nn.Linear(8, 4)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+        scheduler = _prepare_scheduler(
+            optimizer,
+            total_epochs=120,
+            training_config={
+                "learning_rate": 2e-4,
+                "lr_scheduler": {
+                    "type": "plateau",
+                    "gamma": 0.5,
+                    "patience": 4,
+                },
+            },
+        )
+        lrs = []
+        for _ in range(7):
+            lrs.append(optimizer.param_groups[0]["lr"])
+            optimizer.step()
+            scheduler.step(1.0)
+        self.assertEqual(lrs[0], 2e-4)
+        self.assertEqual(lrs[4], 2e-4)
+        self.assertEqual(lrs[5], 2e-4)
+        self.assertAlmostEqual(lrs[6], 1e-4, places=10)
+
+    def test_cnn1d_tcn_fusion_config_uses_run_a_training_baseline(self):
+        """Run D 把训练超参回退到 Run A 实测基线（cosine_warmup + lr=3e-4 + sum_w=0.1 mse +
+        patience=25），用于评估"编码器输入语义修复"的纯增量；model.dropout 三项保留 Run B/C
+        阶段上调后的取值（0.15 / 0.25 / 0.25），属于本轮不动的参数面。"""
+        config_path = ROOT / "configs" / "deep" / "slow_only_cnn1d_tcn_fusion_multimodal_formal.yaml"
+        with config_path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        training = config["training"]
+        model = config["model"]
+        self.assertEqual(training["learning_rate"], 0.0003)
+        self.assertEqual(training["early_stopping_patience"], 25)
+        self.assertEqual(training["lr_scheduler"]["type"], "cosine_warmup")
+        self.assertEqual(training["lr_scheduler"]["warmup_epochs"], 10)
+        self.assertEqual(training["lr_scheduler"]["eta_min"], 0.00003)
+        self.assertEqual(training["sum_constraint"]["weight"], 0.1)
+        self.assertEqual(training["sum_constraint"]["penalty"], "mse")
+        self.assertEqual(model["acoustic_dropout"], 0.15)
+        self.assertEqual(model["tcn_dropout"], 0.25)
+        self.assertEqual(model["head_dropout"], 0.25)
 
 
 if __name__ == "__main__":

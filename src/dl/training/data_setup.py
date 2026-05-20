@@ -38,10 +38,40 @@ def load_config(config_path: Path) -> dict:
 
 
 def _ensure_scaler_path(data_config: dict, output_dir: Path) -> None:
-    if data_config.get("scaler_path"):
-        return
-    filename = "scaler_slow_sequence.json" if data_config.get("dataset_type") == "waveform_v3" else "scaler_sequence.json"
-    data_config["scaler_path"] = str(output_dir / filename)
+    if not data_config.get("scaler_path"):
+        filename = "scaler_slow_sequence.json" if data_config.get("dataset_type") == "waveform_v3" else "scaler_sequence.json"
+        data_config["scaler_path"] = str(output_dir / filename)
+    if not data_config.get("label_scaler_path"):
+        data_config["label_scaler_path"] = str(output_dir / "label_scaler.json")
+
+
+def _fit_and_save_label_scaler(
+    y_train: np.ndarray,
+    label_names: list[str],
+    save_path: Path | None,
+) -> np.ndarray:
+    """在 train split 上统计每个标签维度的 mean/std，落盘后返回 std (用于加权 loss)。"""
+    import json as _json
+    mean = y_train.mean(axis=0).astype(np.float32)
+    std = y_train.std(axis=0).astype(np.float32)
+    std = np.where(std < 1e-12, np.float32(1.0), std)
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(
+            _json.dumps(
+                {
+                    "method": "z_score",
+                    "fit_scope": "train_split_only",
+                    "transform_target": "y",
+                    "label_names": list(label_names),
+                    "mean": mean.astype(float).tolist(),
+                    "std": std.astype(float).tolist(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return std
 
 
 def _build_waveform_datasets(data_config: dict, seed: int):
@@ -68,6 +98,11 @@ def _build_waveform_datasets(data_config: dict, seed: int):
         slow_train = slow_train[:, time_indices, :]
     slow_scaler = load_or_fit_scaler(scaler_path, slow_train, channel_names=list(data["slow_channel_names"]))
 
+    label_scaler_path = resolve_path(data_config.get("label_scaler_path"))
+    y_train = np.asarray(data["y"], dtype=np.float32)[split_indices["train"]]
+    label_names = [str(value) for value in data["label_names"]]
+    label_std = _fit_and_save_label_scaler(y_train, label_names, label_scaler_path)
+
     common = {
         "npz_path": npz_path,
         "slow_scaler": slow_scaler,
@@ -76,6 +111,8 @@ def _build_waveform_datasets(data_config: dict, seed: int):
         "preloaded_data": data,
     }
     datasets = {name: WaveformSequenceDataset(indices=indices, **common) for name, indices in split_indices.items()}
+    for ds in datasets.values():
+        ds.label_std = label_std
     return datasets, splits
 
 
@@ -113,6 +150,11 @@ def _build_v2_datasets(data_config: dict, seed: int):
     scaler = load_or_fit_scaler(scaler_path, X_train, channel_names=channel_names)
     dataset_scaler = scaler.subset(channel_indices)
 
+    label_scaler_path = resolve_path(data_config.get("label_scaler_path"))
+    y_train = np.asarray(data["y"], dtype=np.float32)[split_indices["train"]]
+    label_names = [str(value) for value in data["label_names"]]
+    label_std = _fit_and_save_label_scaler(y_train, label_names, label_scaler_path)
+
     common = {
         "npz_path": npz_path,
         "scaler": dataset_scaler,
@@ -125,6 +167,8 @@ def _build_v2_datasets(data_config: dict, seed: int):
         "preloaded_data": data,
     }
     datasets = {name: V2SequenceDataset(indices=indices, **common) for name, indices in split_indices.items()}
+    for ds in datasets.values():
+        ds.label_std = label_std
     return datasets, splits
 
 

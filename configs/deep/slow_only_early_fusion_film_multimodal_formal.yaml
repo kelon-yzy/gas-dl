@@ -1,0 +1,56 @@
+run:
+  name: v3_early_fusion_film_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_early_fusion_film_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: early_fusion_film
+  slow_dim: 8
+  d_model: 128
+  conv_channels: [32, 64, 96, 128]
+  conv_kernels: [15, 11, 7, 5]
+  conv_dropout: 0.0
+  transformer_layers: 3
+  transformer_heads: 4
+  transformer_ff_mult: 4
+  transformer_dropout: 0.1
+  head_dropout: 0.15
+  out_dim: 4
+  max_timesteps: 120
+  use_positional_embedding: true
+  film_zero_init: true
+  use_ultrasonic: true
+  use_fiber_mic: true
+
+training:
+  epochs: 120
+  batch_size: 32
+  device: auto
+  amp: false
+  optimizer: adamw
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: true
+  sum_constraint:
+    weight: 0.1
+    target_sum: 100.0
+    penalty: mse
+  early_stopping_patience: 25
+  num_workers: 4
+  eval_num_workers: 2
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 10
+    eta_min: 0.00003

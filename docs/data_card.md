@@ -6,6 +6,8 @@
 > 目标路径：`V3_正式实验/data/waveform_v3/`
 > calibration_status：`pending`
 
+> ⚠️ **2026-05-19 更新**：正式主线已切到 `data/waveform_v3_seedpath_formal/`（30000 序列、4 路 split + extrapolation holdout）。本卡片仍记录 V3.1 共用规格（张量字段、物理参数、慢通道顺序等不变），新数据集的 split / scaler / 样本数差异见文末 §"v0.2 seedpath_formal 版本差异" 和 [`waveform_v3_seedpath_formal_数据分析报告.md`](./waveform_v3_seedpath_formal_数据分析报告.md)。
+
 ## 数据规格
 
 ```yaml
@@ -280,3 +282,18 @@ slow scaler 文件保持：`scaler_slow_sequence.json`, `scaler_slow_sequence_mo
 - 老仓库的中间产物（output_waveform_traditional*）
 
 如需对照，需在 `../深度学习测试/` 中查询。
+
+## v0.2 seedpath_formal 版本差异
+
+| 项 | `data/waveform_v3/`（v0.1） | `data/waveform_v3_seedpath_formal/`（v0.2） |
+|---|---:|---:|
+| 序列数 | 10000 | 30000 |
+| base condition 数 | 10000 | 10000 |
+| noise seed 数 | 1 | 3 |
+| split 策略 | 旧 mixture group 随机切（train/val/test 3 路） | `stratified_group_by_mixture_id_with_extrapolation_holdout`（train/val/test/extrapolation 4 路） |
+| split 数（train/val/test/extra） | 7028 / 1478 / 1494 / — | 17400 / 4050 / 4050 / 4500 |
+| scaler 拟合范围 | 旧 train split | 新 train split（已重新拟合） |
+| 张量字段 / 慢通道顺序 / 标签顺序 | 与 v0.2 一致 | 与 v0.1 一致 |
+| ML 特征产物 | `outputs/exp01_traditional/`（40000 样本） | `outputs/exp01_traditional_seedpath/`（120000 样本） |
+
+下游适配（DL `cnn1d_tcn_fusion` 与 ML 全套传统模型）已完成，详见 [`waveform_v3_seedpath_formal_适配说明.md`](./waveform_v3_seedpath_formal_适配说明.md)。两份数据集 `mixture_id` 命名空间不同，不要交叉使用 split 文件。

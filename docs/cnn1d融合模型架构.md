@@ -7,7 +7,7 @@
 │                        cnn1d_multimodal                                 │
 │  = MultimodalWrapper(backbone=CNN1DRegressor)                          │
 │                                                                         │
-│  输入 (6 个张量)                                                        │
+│  输入 (5 个张量)                                                        │
 │  ┌────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────────────┐  │
 │  │ultrasonic  │  │ultrasonic    │  │fiber_mic   │  │fiber_mic       │  │
 │  │int16       │  │_scale       │  │int16       │  │_scale          │  │
@@ -24,15 +24,12 @@
 │              │     ┌─────────────┐           │                         │
 │              │     │slow (B,T,8) │           │                         │
 │              │     └──────┬──────┘           │                         │
-│              │     ┌────────────────────┐    │                         │
-│              │     │stage_one_hot(B,T,4)│    │                         │
-│              │     └──────────┬─────────┘    │                         │
 │              ▼            ▼                  ▼                        │
-│         torch.cat([u_emb, f_emb, slow, stage_one_hot], dim=-1)        │
-│                    fused: (B, T, 140)                                  │
+│         torch.cat([u_emb, f_emb, slow], dim=-1)                       │
+│                    fused: (B, T, 136)                                  │
 │                         │                                              │
 │                    transpose(1,2)                                      │
-│                    (B, 140, T)  ← NCT 格式                            │
+│                    (B, 136, T)  ← NCT 格式                            │
 │                         │                                              │
 │                         ▼                                              │
 │              ┌──────────────────────┐                                   │
@@ -46,13 +43,11 @@
 ## 2. 数据流 — 逐阶段形状
 
 | 阶段                           | 张量         | 形状                                   | 数据类型    | 备注               |
-| ---------------------------- | ---------- | ------------------------------------ | ------- | ---------------- |
+| ---------------------------- | ---------- | ------------------------------------ | ------- | ----------------  |
 | 磁盘                           | ultrasonic | (N, T, 1000)                         | int16   | memmap 懒加载       |
 | 磁盘                           | fiber_mic  | (N, T, 2000)                         | int16   | memmap 懒加载       |
 | 磁盘                           | slow       | (N, T, 8)                            | float32 | 8 个慢变量通道         |
 | 磁盘                           | y          | (N, 4)                               | float32 | H2/CH4/CO2/N2 浓度 |
-| Dataset.__getitem__          | stage_one_hot | (T, 4)                            | float32 | 在线生成，不写入数据包 |
-| Dataset.__getitem__          | ultrasonic | (T, 1000)                            | int16   |                  |
 | DataLoader batch             | ultrasonic | (B, T, 1000)                         | int16   |                  |
 | **AcousticWaveformEncoder**  |            |                                      |         |                  |
 | flatten                      | waveform   | (B\*T, 1000)                         | int16   |                  |
@@ -70,17 +65,19 @@
 | Linear(128→64)+LN+Dropout    |            | (B\*T, 64)                           |         | 投影头              |
 | reshape                      | embedding  | (B, T, 64)                           |         |                  |
 | **MultimodalWrapper**        |            |                                      |         |                  |
-| cat([u_emb, f_emb, slow, stage_one_hot]) | fused | (B, T, 140)               |         | 64+64+8+4        |
-| transpose                    | fused      | (B, 140, T)                          |         | NCT 格式           |
+| cat([u_emb, f_emb, slow])    | fused      | (B, T, 136)                          |         | 64+64+8          |
+| transpose                    | fused      | (B, 136, T)                          |         | NCT 格式           |
 | **CNN1DRegressor**           |            |                                      |         |                  |
-| Conv1d(140→32,k5,p2)         |            | (B, 32, T)                           |         |                  |
+| Conv1d(136→32,k5,p2)         |            | (B, 32, T)                           |         |                  |
 | BN(32)+ReLU+Dropout          |            | (B, 32, T)                           |         |                  |
 | Conv1d(32→64,k5,p2)          |            | (B, 64, T)                           |         |                  |
 | BN(64)+ReLU+Dropout          |            | (B, 64, T)                           |         |                  |
 | Conv1d(64→64,k3,p1)          |            | (B, 64, T)                           |         |                  |
 | BN(64)+ReLU                  |            | (B, 64, T)                           |         | 无 Dropout        |
-| AdaptiveAvgPool1d(1)+Flatten |            | (B, 64)                              |         |                  |
-| Linear(64→64)+ReLU+Dropout   |            | (B, 64)                              |         |                  |
+| AdaptiveAvgPool1d(1)         | avg        | (B, 64, 1) → flatten → (B, 64)       |         |                  |
+| AdaptiveMaxPool1d(1)         | mx         | (B, 64, 1) → flatten → (B, 64)       |         |                  |
+| cat([avg, mx])               |            | (B, 128)                             |         | mean+max 末端汇聚 |
+| Linear(128→64)+ReLU+Dropout  |            | (B, 64)                              |         |                  |
 | Linear(64→4)                 |            | (B, 4)                               |         | 最终预测             |
 
 ## 3. 构造链路
@@ -94,11 +91,11 @@ YAML配置 → build_model({"name": "cnn1d_multimodal", ...})
 
 `_build_multimodal` 内部：
 
-1. 提取 wrapper 参数: `slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64, use_stage_one_hot=True, stage_dim=4`
-2. 计算 `fused_dim = 8 + 64*2 + 4 = 140`
+1. 提取 wrapper 参数: `slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64`
+2. 计算 `fused_dim = 8 + 64*2 = 136`
 3. 只传白名单参数给 backbone:
-   `CNN1DRegressor(in_channels=140, hidden_channels=[32,64,64], kernel_size=5, dropout=0.1, out_dim=4)`
-4. 构造 `MultimodalWrapper(backbone, slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64, use_stage_one_hot=True, stage_dim=4)`
+   `CNN1DRegressor(in_channels=136, hidden_channels=[32,64,64], kernel_size=5, dropout=0.1, temporal_pooling="mean_max", out_dim=4)`
+4. 构造 `MultimodalWrapper(backbone, slow_dim=8, use_ultrasonic=True, use_fiber_mic=True, waveform_embedding_dim=64)`
 
 ## 4. 三个核心模块细节
 
@@ -120,23 +117,21 @@ Linear(128→64) → LayerNorm(64) → Dropout(0.1)     输出: 64维
 ### MultimodalWrapper（融合包装器）
 
 - 持有 2 个 AcousticWaveformEncoder（可独立开关）
-- 持有可选阶段 one-hot 分支：`stage_one_hot ∈ R^(B,T,4)`，语义为
-  - `baseline = [1,0,0,0]`
-  - `exposure = [0,1,0,0]`
-  - `steady = [0,0,1,0]`
-  - `recovery = [0,0,0,1]`
-- 阶段编码由 `WaveformSequenceDataset` 按 `phase_boundaries()` 在线生成，不依赖新数据包
-- 拼接：`cat([ultrasonic_emb, fiber_mic_emb, slow, stage_one_hot], dim=-1)` → (B, T, 140)
+- 拼接：`cat([ultrasonic_emb, fiber_mic_emb, slow], dim=-1)` → (B, T, 136)
 - 按 backbone 的 input_format 转置：
-  - NCT（CNN1D/TCN/CNN-LSTM）：`transpose(1,2)` → (B, 140, T)
-  - NTC（GRU/LSTM/Transformer）：保持 (B, T, 140)
-- `use_stage_one_hot=False` 时退回旧行为，不影响其他多模态模型
+  - NCT（CNN1D/TCN/CNN-LSTM）：`transpose(1,2)` → (B, 136, T)
+  - NTC（GRU/LSTM/Transformer）：保持 (B, T, 136)
+
+> **历史说明**：曾实验过 `stage_one_hot`（4 维阶段 one-hot 编码）作为额外输入分支，包括浅层拼接和深层注入两种方式。实验结果表明该方案未带来性能提升且增加了训练复杂度，已从正式架构中移除。
 
 ### CNN1DRegressor（backbone）
 
 - 3 层 Conv1d + BN + ReLU，前 2 层加 Dropout
 - kernel_size：前 2 层用配置值(5)，第 3 层固定用 3
-- 全局平均池化 → 2 层 MLP head
+- 支持 `temporal_pooling="avg"` 和 `temporal_pooling="mean_max"` 两种末端时序汇聚
+- `cnn1d_multimodal` 默认使用 `mean_max`：先做全局平均池化和全局最大池化，再拼接后送入 MLP head
+- 这次改造只改变 CNN1D backbone 的序列级末端汇聚，不改变 AcousticWaveformEncoder 内部的 `avg + max` 波形汇聚
+- 两层汇聚组合后的设计动机是减少跨时间步稀疏峰值事件被纯平均池化抹平的风险
 - `input_format = "NCT"`，接收 `(B, in_channels, T)`
 
 ## 5. 参数统计
@@ -153,29 +148,27 @@ Linear(128→64) → LayerNorm(64) → Dropout(0.1)     输出: 64维
 model:
   name: cnn1d_multimodal
   slow_dim: 8
-  use_stage_one_hot: true
-  stage_dim: 4
   hidden_channels: [32, 64, 64]
   kernel_size: 5
   dropout: 0.1
+  temporal_pooling: mean_max
   out_dim: 4
 
 training:
-  epochs: 200
-  batch_size: 8
+  epochs: 120
+  batch_size: 32
+  amp: true
   optimizer: adamw
   learning_rate: 0.001
-  weight_decay: 0.01
+  weight_decay: 0.0001
   grad_clip_norm: 1.0
   lr_scheduler: cosine_warmup  # 5 epoch warmup, eta_min=0.0001
-  early_stopping_patience: 25
+  early_stopping_patience: 15
 ```
 
 ## 7. 关键约束
 
 - `waveform_embedding_dim` 锁定为 64（encoder 内强制校验）
 - `slow_dim` 锁定为 8（V3 方案）
-- `stage_dim` 锁定为 4（baseline / exposure / steady / recovery）
 - `out_dim = 4`（H2/CH4/CO2/N2 四组分浓度）
-- `use_stage_one_hot=true` 时，CNN1D 的 `in_channels` 从 136 变为 140
-- 旧 checkpoint 不兼容新架构（输入维度与 state_dict 结构变化）
+- 旧 checkpoint 不兼容新架构（输入维度变化：140→136）

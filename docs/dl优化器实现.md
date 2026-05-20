@@ -1,14 +1,16 @@
 # CNN1D_multimodal 优化器改进：Linear Warmup + Cosine Decay 详细实现文档
 
-> 创建日期：2026-05-16
+> 创建日期：2026-05-16 | 更新日期：2026-05-17
 > 范围：仅修改 CNN1D_multimodal 配置和训练代码，验证后推广到其他 5 个模型
+>
+> **更新说明**：`stage_one_hot` 实验路径已回退。该方案在浅层拼接和深层注入两种模式下均未带来性能提升，已从正式架构和配置中移除。当前正式配置以单次训练版本为准：`batch_size=32, epochs=120, patience=15, weight_decay=0.0001, amp=true`。
 
 ## 1. 变更总览
 
 | 文件                                                    | 变更类型 | 说明                                                                   |
 | ----------------------------------------------------- | ---- | -------------------------------------------------------------------- |
 | `src/dl/training/train.py`                            | 修改   | 增加 AdamW 支持、学习率调度器、梯度裁剪、checkpoint 恢复调度器                             |
-| `configs/deep/slow_only_cnn1d_multimodal_formal.yaml` | 修改   | optimizer=adamw, weight_decay=0.01, 新增 lr_scheduler 和 grad_clip_norm |
+| `configs/deep/slow_only_cnn1d_multimodal_formal.yaml` | 修改   | optimizer=adamw, weight_decay=0.0001, 新增 lr_scheduler、grad_clip_norm、amp=true；移除 use_stage_one_hot/stage_dim |
 | `tests/test_deep_checkpoint_resume.py`                | 修改   | 增加 scheduler 恢复的测试用例                                                 |
 
 ## 2. 代码改动详述
@@ -250,14 +252,15 @@ model:
   out_dim: 4
 
 training:
-  epochs: 200
-  batch_size: 8
+  epochs: 120
+  batch_size: 32
   device: auto
+  amp: true
   optimizer: adamw
   learning_rate: 0.001
-  weight_decay: 0.01
+  weight_decay: 0.0001
   loss: mse
-  early_stopping_patience: 25
+  early_stopping_patience: 15
   num_workers: 2
   eval_num_workers: 1
   grad_clip_norm: 1.0
@@ -272,7 +275,11 @@ training:
 | 键                            | 旧值          | 新值              | 理由                               |
 | ---------------------------- | ----------- | --------------- | -------------------------------- |
 | `optimizer`                  | （无，默认 adam） | `adamw`         | 解耦 weight decay                  |
-| `weight_decay`               | `0.0001`    | `0.01`          | AdamW 标准值（ICLR 2025 Wang et al.） |
+| `batch_size`                | `8`         | `32`            | 更大 batch 更稳定（one_hot 回退后输入维度降低）       |
+| `epochs`                    | `200`       | `120`           | 更短训练周期，单次训练收敛                   |
+| `early_stopping_patience`   | `25`        | `15`            | 配合更短训练周期                          |
+| `weight_decay`              | `0.01`      | `0.0001`        | 降低正则化强度（one_hot 回退后模型更轻）        |
+| `amp`                       | （无）         | `true`          | 混合精度训练，加速                           |
 | `grad_clip_norm`             | （无，默认 0）    | `1.0`           | 防止 val_loss 极端值 18.78            |
 | `lr_scheduler.type`          | （无）         | `cosine_warmup` | d2l 11.11 + LLaMA 实践             |
 | `lr_scheduler.warmup_epochs` | （无）         | `5`             | 200 epoch × 2.5% = 5 epoch       |

@@ -179,31 +179,31 @@ checkpoint 内容固定为：
 测试场景：
 
 - `test_checkpoint_written_after_epoch`
-
+  
   - 用小型 synthetic Dataset 和轻量模型跑 1 epoch。
   - 断言 `last_checkpoint.pt` 存在。
   - 断言 checkpoint 包含 `model_state_dict`、`optimizer_state_dict`、`amp_scaler_state_dict`、`early_stopping`、`log_rows`、`epoch`。
 
 - `test_resume_continues_from_next_epoch`
-
+  
   - 第一次用 `stop_after_epoch=1` 保存 checkpoint。
   - 第二次用 `resume_path` 和 `epochs_override=2` 恢复。
   - 断言最终 `train_log.csv` 有 epoch 1 和 epoch 2。
   - 断言 `epochs_trained == 2`。
 
 - `test_resume_preserves_existing_log_rows`
-
+  
   - checkpoint 内放入已有 `log_rows`。
   - 恢复训练后确认没有覆盖旧日志，也没有重复 epoch。
 
 - `test_pipeline_passes_resume_args`
-
+  
   - mock `train_config()`。
   - 调用 `src/pipeline/train_deep.py --resume ... --checkpoint-every 5 --no-resume-rng`。
   - 断言 CLI 参数正确传入。
 
 - `test_keyboard_interrupt_writes_paused_checkpoint`
-
+  
   - mock `_train_one_epoch()` 在第一轮抛出 `KeyboardInterrupt`。
   - 断言 `paused_checkpoint.pt` 存在。
   - 断言 `summary["training_status"] == "paused"`。

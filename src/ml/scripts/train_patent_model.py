@@ -7,11 +7,12 @@ from pathlib import Path
 import sys
 from time import perf_counter
 
+import numpy as np
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-import pandas as pd
 
 from patent_model.config import BRANCH_NAMES
 from patent_model.data_loader import grouped_train_test_split, load_patent_dataset
@@ -79,6 +80,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duplicate-filter", default="per_mixture_limit", help="Optional duplicate handling mode.")
     parser.add_argument("--duplicate-per-mixture-limit", type=positive_int, default=3, help="Optional cap when duplicate_filter=per_mixture_limit.")
     parser.add_argument("--duplicate-filter-seed", type=int, default=42, help="Random seed for duplicate filtering.")
+    parser.add_argument(
+        "--split-dir",
+        default=None,
+        help="可选：DL split 目录（含 train/val/test_sequence_ids.csv）。命中时按 mixture_id 复用 DL 切分，忽略 test_ratio。",
+    )
+    parser.add_argument(
+        "--split-include-val-in-train",
+        action="store_true",
+        default=True,
+        help="使用 split-dir 时是否把 val mixture 并入训练集（默认 True；ML pipeline 没有独立 val 概念）。",
+    )
+    parser.add_argument(
+        "--no-split-include-val-in-train",
+        dest="split_include_val_in_train",
+        action="store_false",
+        help="使用 split-dir 时不把 val mixture 并入训练集（保留为 holdout，不参与训练也不评估）。",
+    )
     return parser
 
 
@@ -151,6 +169,65 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--mc-env-samples is only supported with profiles that embed environment columns.")
 
 
+def _load_split_mixture_ids(split_dir: Path) -> dict[str, set[str]]:
+    """从 DL 风格的 split 目录读取每个 split 的 mixture_id 集合。
+
+    必需文件：train/val/test_sequence_ids.csv。extrapolation 可选。
+    """
+
+    required = {
+        "train": split_dir / "train_sequence_ids.csv",
+        "val": split_dir / "val_sequence_ids.csv",
+        "test": split_dir / "test_sequence_ids.csv",
+    }
+    missing = [str(path) for path in required.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"split_dir 缺少必需文件: {missing}")
+    result: dict[str, set[str]] = {}
+    for name, path in required.items():
+        frame = pd.read_csv(path)
+        if "mixture_id" not in frame.columns:
+            raise ValueError(f"{path} 缺少 mixture_id 列")
+        result[name] = set(frame["mixture_id"].astype(str).tolist())
+    extrapolation_path = split_dir / "extrapolation_sequence_ids.csv"
+    if extrapolation_path.exists():
+        frame = pd.read_csv(extrapolation_path)
+        if "mixture_id" in frame.columns:
+            result["extrapolation"] = set(frame["mixture_id"].astype(str).tolist())
+    return result
+
+
+def _split_dataset_by_mixture(
+    dataset: PatentDataset,
+    split_dir: Path,
+    include_val_in_train: bool,
+) -> tuple[PatentDataset, PatentDataset]:
+    """按 DL split 文件里的 mixture_id 切训练/测试集。
+
+    返回 (train, test)：
+      - train = train mixtures (+ val mixtures if include_val_in_train)
+      - test  = test mixtures
+      - extrapolation mixtures 既不进 train 也不进 test，与 DL 行为一致。
+    """
+
+    split_mixtures = _load_split_mixture_ids(split_dir)
+    train_groups = set(split_mixtures["train"])
+    if include_val_in_train:
+        train_groups |= split_mixtures["val"]
+    test_groups = set(split_mixtures["test"])
+    mixture_series = dataset.metadata["mixture_id"].astype(str)
+    train_mask = mixture_series.isin(train_groups).to_numpy()
+    test_mask = mixture_series.isin(test_groups).to_numpy()
+    train_idx = np.flatnonzero(train_mask)
+    test_idx = np.flatnonzero(test_mask)
+    if train_idx.size == 0 or test_idx.size == 0:
+        raise ValueError(
+            f"split_dir 切分产生空集合: train={train_idx.size} test={test_idx.size}. "
+            "检查 condition_grid_v1.csv 中的 mixture_id 是否与 split 文件一致。"
+        )
+    return dataset.subset(train_idx), dataset.subset(test_idx)
+
+
 def prepare_training_data(
     args: argparse.Namespace,
     dataset: PatentDataset | None = None,
@@ -174,7 +251,20 @@ def prepare_training_data(
     observed_labels = build_observed_fault_labels(dataset)
     dataset = dataset.with_fault_labels(observed_labels)
 
-    train, test = grouped_train_test_split(dataset, test_ratio=args.test_ratio, seed=args.seed)
+    split_dir_arg = getattr(args, "split_dir", None)
+    if split_dir_arg:
+        split_dir_path = Path(split_dir_arg)
+        if not split_dir_path.is_absolute() and not split_dir_path.exists():
+            fallback = ROOT.parent / split_dir_path
+            if fallback.exists():
+                split_dir_path = fallback
+        train, test = _split_dataset_by_mixture(
+            dataset,
+            split_dir_path,
+            include_val_in_train=getattr(args, "split_include_val_in_train", True),
+        )
+    else:
+        train, test = grouped_train_test_split(dataset, test_ratio=args.test_ratio, seed=args.seed)
     train = limit_dataset(train, args.train_limit)
     test = limit_dataset(test, args.test_limit)
     train_original_samples = train.n_samples
@@ -272,6 +362,8 @@ def run_training(
         "resolved_feature_profile": prepared_data.feature_profile_name,
         "component_mode": args.component_mode,
         "include_environment": config.include_environment,
+        "split_dir": str(Path(args.split_dir).resolve()) if getattr(args, "split_dir", None) else None,
+        "split_include_val_in_train": bool(getattr(args, "split_include_val_in_train", True)) if getattr(args, "split_dir", None) else None,
         "mc_env_samples": args.mc_env_samples,
         "mc_env_sigma_T": args.mc_env_sigma_t,
         "mc_env_sigma_P": args.mc_env_sigma_p,
