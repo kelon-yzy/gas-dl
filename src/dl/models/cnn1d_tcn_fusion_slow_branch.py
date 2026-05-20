@@ -46,13 +46,17 @@ class GasHeadNormalize(nn.Module):
     """气体组分输出头，保证所有输出非负且 sum = target_sum。
 
     derive_last=False (默认): 对 out_dim 个 softplus 输出做归一化，所有组分梯度耦合。
-    derive_last=True:  只预测前 out_dim-1 个自由组分 (softplus 保证正),
-        最后一个组分 = target_sum - sum(前面)。梯度解耦，适合最后一个组分
-        缺乏直接传感器信号的场景（如 N2）。
+    derive_last=True:
+        - residual: 只预测前 out_dim-1 个自由组分 (softplus 保证正),
+          最后一个组分 = target_sum - sum(前面)。向后兼容旧实验。
+        - bounded_simplex: 预测前 out_dim-1 个组分的比例 + 总量，最后一个
+          组分由剩余量推导；所有组分非负且 sum=target_sum。
     """
 
     def __init__(self, in_dim: int, out_dim: int = 4, target_sum: float = 100.0,
-                 eps: float = 1e-8, derive_last: bool = False):
+                 eps: float = 1e-8, derive_last: bool = False,
+                 derive_last_mode: str = "residual",
+                 output_prior: Sequence[float] | None = None):
         super().__init__()
         if in_dim <= 0:
             raise ValueError(f"in_dim 必须为正整数，得到 {in_dim}")
@@ -62,22 +66,69 @@ class GasHeadNormalize(nn.Module):
         self.output_dim = int(out_dim)
         self.target_sum = float(target_sum)
         self.derive_last = bool(derive_last)
-        n_predict = out_dim - 1 if self.derive_last else out_dim
+        self.derive_last_mode = str(derive_last_mode).lower()
+        if self.derive_last_mode not in {"residual", "bounded_simplex"}:
+            raise ValueError(f"未知 derive_last_mode: {derive_last_mode}")
+        if self.derive_last_mode == "bounded_simplex" and out_dim < 2:
+            raise ValueError("bounded_simplex 模式至少需要 2 个输出维度")
+        n_predict = out_dim
+        if self.derive_last and self.derive_last_mode == "residual":
+            n_predict = out_dim - 1
         self.head = nn.Sequential(
             nn.Linear(in_dim, 128),
             nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(128, n_predict),
         )
+        if self.derive_last and self.derive_last_mode == "bounded_simplex":
+            self._init_bounded_simplex_prior(output_prior)
+
+    def _init_bounded_simplex_prior(self, output_prior: Sequence[float] | None) -> None:
+        if output_prior is None:
+            prior = torch.full((self.output_dim,), self.target_sum / self.output_dim, dtype=torch.float32)
+        else:
+            if len(output_prior) != self.output_dim:
+                raise ValueError(f"output_prior 长度 ({len(output_prior)}) 必须等于 out_dim ({self.output_dim})")
+            prior = torch.tensor(output_prior, dtype=torch.float32)
+        if torch.any(prior < 0).item():
+            raise ValueError(f"output_prior 必须非负，得到 {output_prior}")
+        prior_sum = prior.sum()
+        if prior_sum <= 0:
+            raise ValueError("output_prior 总和必须为正")
+        prior = prior / prior_sum * self.target_sum
+        init_eps = max(self.eps, 1e-6)
+
+        free_prior = torch.clamp(prior[:-1], min=init_eps)
+        last_prior = torch.clamp(prior[-1], min=init_eps)
+        free_total = torch.clamp(self.target_sum - last_prior, min=init_eps, max=self.target_sum - init_eps)
+        free_ratio = free_prior / free_prior.sum()
+        total_prob = torch.clamp(free_total / self.target_sum, min=init_eps, max=1.0 - init_eps)
+        bias = torch.cat([
+            torch.log(torch.clamp(free_ratio, min=init_eps)),
+            torch.logit(total_prob).reshape(1),
+        ])
+        final = self.head[-1]
+        with torch.no_grad():
+            final.weight.zero_()
+            final.bias.copy_(bias.to(final.bias.dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raw = self.head(x)
-        positive = F.softplus(raw) + self.eps
         if self.derive_last:
-            # 3+1 模式：前 n-1 个组分独立预测，最后一个由残差推导
+            if self.derive_last_mode == "bounded_simplex":
+                free_logits = raw[..., :-1]
+                total_logit = raw[..., -1:]
+                free_total = self.target_sum * torch.sigmoid(total_logit)
+                free_ratio = F.softmax(free_logits, dim=-1)
+                free = free_total * free_ratio
+                derived = self.target_sum - free_total
+                return torch.cat([free, derived], dim=-1)
+            positive = F.softplus(raw) + self.eps
+            # 旧 residual 模式：前 n-1 个组分独立预测，最后一个由残差推导
             derived = self.target_sum - positive.sum(dim=-1, keepdim=True)
             return torch.cat([positive, derived], dim=-1)
         # 归一化模式（原始行为）
+        positive = F.softplus(raw) + self.eps
         y_pred = positive / positive.sum(dim=-1, keepdim=True)
         return y_pred * self.target_sum
 
@@ -105,6 +156,8 @@ class CNN1DTCNSlowBranchRegressor(nn.Module):
                 "use_ultrasonic": True,
                 "use_fiber_mic": True,
                 "derive_last": False,
+                "derive_last_mode": "residual",
+                "output_prior": None,
                 "slow_encoder": {
                     "enabled": False,
                     "hidden_dim": 32,
@@ -197,7 +250,14 @@ class CNN1DTCNSlowBranchRegressor(nn.Module):
             nn.Dropout(head_dropout),
         )
         derive_last = bool(settings["derive_last"])
-        self.head = GasHeadNormalize(64, out_dim=out_dim, target_sum=100.0, derive_last=derive_last)
+        self.head = GasHeadNormalize(
+            64,
+            out_dim=out_dim,
+            target_sum=100.0,
+            derive_last=derive_last,
+            derive_last_mode=str(settings["derive_last_mode"]),
+            output_prior=settings.get("output_prior"),
+        )
 
     def _encode_waveform_branch(
         self,

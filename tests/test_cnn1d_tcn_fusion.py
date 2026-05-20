@@ -182,10 +182,11 @@ class DeepAcousticEncoder1DTests(unittest.TestCase):
 class GasHeadDeriveLastTests(unittest.TestCase):
     """GasHeadNormalize derive_last=True (3+1 输出) 回归测试。"""
 
-    def _build_slow_branch(self, derive_last: bool):
+    def _build_slow_branch(self, derive_last: bool, derive_last_mode: str = "residual", output_prior=None):
         from models.cnn1d_tcn_fusion_slow_branch import CNN1DTCNSlowBranchRegressor
         return CNN1DTCNSlowBranchRegressor(config={
             "slow_dim": 8, "out_dim": 4, "derive_last": derive_last,
+            "derive_last_mode": derive_last_mode, "output_prior": output_prior,
             "acoustic_channels": [16, 32], "tcn_channels": [32],
             "waveform_embedding_dim": 32, "acoustic_dropout": 0.0,
             "tcn_dropout": 0.0, "head_dropout": 0.0,
@@ -240,6 +241,50 @@ class GasHeadDeriveLastTests(unittest.TestCase):
         # H2 和 CH4 的梯度应不同（独立路径），不像 normalize 模式那样耦合
         self.assertFalse(torch.allclose(grad_h2, grad_ch4, atol=1e-6),
                          "derive_last 模式下自由组分梯度应独立")
+
+    def test_bounded_simplex_output_is_nonnegative_and_sums_to_target(self):
+        """bounded_simplex 模式应保证所有组分非负且 sum=100。"""
+        from models.cnn1d_tcn_fusion_slow_branch import GasHeadNormalize
+        head = GasHeadNormalize(in_dim=4, out_dim=4, derive_last=True, derive_last_mode="bounded_simplex")
+        # 极端 logits：前三项比例偏置很大，总量接近 100，也不能产生负 N2。
+        with torch.no_grad():
+            for param in head.parameters():
+                param.zero_()
+            head.head[-1].bias.copy_(torch.tensor([20.0, -20.0, 0.0, 20.0]))
+        out = head(torch.zeros(3, 4))
+        self.assertTrue(torch.all(out >= 0.0).item())
+        self.assertTrue(torch.allclose(out.sum(dim=1), torch.full((3,), 100.0), atol=1e-4))
+
+    def test_bounded_simplex_prior_initialization_matches_label_mean(self):
+        """output_prior 应把 bounded_simplex 初始输出放在标签均值附近。"""
+        from models.cnn1d_tcn_fusion_slow_branch import GasHeadNormalize
+        prior = [9.288469, 75.755157, 4.994778, 9.961745]
+        head = GasHeadNormalize(
+            in_dim=64,
+            out_dim=4,
+            derive_last=True,
+            derive_last_mode="bounded_simplex",
+            output_prior=prior,
+        )
+        with torch.no_grad():
+            out = head(torch.randn(2, 64))
+        expected = torch.tensor(prior, dtype=out.dtype)
+        for row in out:
+            self.assertTrue(torch.allclose(row, expected, atol=1e-3))
+
+    def test_slow_branch_bounded_simplex_config_forwards_nonnegative(self):
+        """slow_branch 透传 bounded_simplex 配置后，输出仍是合法组分。"""
+        model = self._build_slow_branch(
+            derive_last=True,
+            derive_last_mode="bounded_simplex",
+            output_prior=[9.288469, 75.755157, 4.994778, 9.961745],
+        )
+        batch = _make_batch(B=2, T=5)
+        with torch.no_grad():
+            out = model(**batch)
+        self.assertEqual(out.shape, (2, 4))
+        self.assertTrue(torch.all(out >= 0.0).item())
+        self.assertTrue(torch.allclose(out.sum(dim=1), torch.full((2,), 100.0), atol=1e-4))
 
 
 if __name__ == "__main__":
