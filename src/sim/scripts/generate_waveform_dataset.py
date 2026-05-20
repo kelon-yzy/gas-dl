@@ -81,7 +81,7 @@ DEFAULT_STRATIFY_FIELDS_WAVEFORM = ("x_H2", "x_CO2", "x_N2", "P_MPa_base", "L_m_
 
 def generate_waveform_dataset(
     output_dir,
-    sequence_count=10000,
+    sequence_count=12000,
     timesteps=DEFAULT_TIMESTEPS,
     seed=GENERATION_SEED,
     dt_s=DEFAULT_DT_S,
@@ -881,7 +881,7 @@ def rebuild_waveform_split_artifacts(
 def main():
     parser = argparse.ArgumentParser(description="Generate V3.1 dual-channel waveform dataset.")
     parser.add_argument("--output-dir", default="data/waveform_v3")
-    parser.add_argument("--sequence-count", type=int, default=10000)
+    parser.add_argument("--sequence-count", type=int, default=12000)
     parser.add_argument("--timesteps", type=int, default=DEFAULT_TIMESTEPS)
     parser.add_argument("--seed", type=int, default=GENERATION_SEED)
     parser.add_argument("--storage", choices=sorted(VALID_STORAGE_FORMATS), default="memmap")

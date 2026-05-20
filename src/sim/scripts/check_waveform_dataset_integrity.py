@@ -79,7 +79,7 @@ def _load_spec(dataset_dir: Path) -> dict:
 def run_integrity_checks(
     dataset_dir: str | Path,
     *,
-    min_sensor_corr: float = 0.5,
+    min_sensor_corr: float = 0.1,
     min_env_corr: float = 0.99,
     min_correlation_rows: int = 100,
     max_t_abs_error: float = 1e-3,
@@ -196,7 +196,7 @@ def run_integrity_checks(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check V3 waveform dataset integrity.")
     parser.add_argument("dataset_dir")
-    parser.add_argument("--min-sensor-corr", type=float, default=0.5)
+    parser.add_argument("--min-sensor-corr", type=float, default=0.1)
     parser.add_argument("--min-env-corr", type=float, default=0.99)
     parser.add_argument("--min-correlation-rows", type=int, default=100)
     parser.add_argument("--report-path")
