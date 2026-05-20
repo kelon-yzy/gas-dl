@@ -179,5 +179,68 @@ class DeepAcousticEncoder1DTests(unittest.TestCase):
             encoder(wave, bad_scale)
 
 
+class GasHeadDeriveLastTests(unittest.TestCase):
+    """GasHeadNormalize derive_last=True (3+1 输出) 回归测试。"""
+
+    def _build_slow_branch(self, derive_last: bool):
+        from models.cnn1d_tcn_fusion_slow_branch import CNN1DTCNSlowBranchRegressor
+        return CNN1DTCNSlowBranchRegressor(config={
+            "slow_dim": 8, "out_dim": 4, "derive_last": derive_last,
+            "acoustic_channels": [16, 32], "tcn_channels": [32],
+            "waveform_embedding_dim": 32, "acoustic_dropout": 0.0,
+            "tcn_dropout": 0.0, "head_dropout": 0.0,
+        })
+
+    def test_derive_last_output_shape_and_sum(self):
+        """derive_last=True 输出形状 (B,4)，sum 恒等于 100。"""
+        model = self._build_slow_branch(derive_last=True)
+        batch = _make_batch(B=2, T=5)
+        with torch.no_grad():
+            out = model(**batch)
+        self.assertEqual(out.shape, (2, 4))
+        for i in range(out.shape[0]):
+            self.assertAlmostEqual(out[i].sum().item(), 100.0, places=3)
+
+    def test_derive_last_false_backward_compatible(self):
+        """derive_last=False 保持原始行为，输出 sum=100。"""
+        model = self._build_slow_branch(derive_last=False)
+        batch = _make_batch(B=2, T=5)
+        with torch.no_grad():
+            out = model(**batch)
+        self.assertEqual(out.shape, (2, 4))
+        for i in range(out.shape[0]):
+            self.assertAlmostEqual(out[i].sum().item(), 100.0, places=3)
+
+    def test_derive_last_gradient_only_flows_to_free_components(self):
+        """derive_last=True 时，对 N2 列的 loss 梯度应通过减法回传到前 3 列。"""
+        model = self._build_slow_branch(derive_last=True)
+        batch = _make_batch(B=4, T=5)
+        out = model(**batch)
+        # 只对第 4 列 (N2) 做 loss
+        loss = out[:, 3].sum()
+        loss.backward()
+        # head 最后一层应有梯度（通过 target_sum - sum(free) 回传）
+        head_params = list(model.head.head.parameters())
+        has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in head_params)
+        self.assertTrue(has_grad, "N2 loss 应通过减法回传梯度到 head 参数")
+
+    def test_derive_last_n2_decoupled_from_normalize(self):
+        """derive_last=True 时，改变前 3 列某一个不会按比例影响其他自由列。"""
+        from models.cnn1d_tcn_fusion_slow_branch import GasHeadNormalize
+        head = GasHeadNormalize(in_dim=64, out_dim=4, derive_last=True)
+        x = torch.randn(1, 64, requires_grad=True)
+        out = head(x)
+        # 对 H2 (col 0) 求梯度
+        out[0, 0].backward(retain_graph=True)
+        grad_h2 = x.grad.clone()
+        x.grad.zero_()
+        # 对 CH4 (col 1) 求梯度
+        out[0, 1].backward(retain_graph=True)
+        grad_ch4 = x.grad.clone()
+        # H2 和 CH4 的梯度应不同（独立路径），不像 normalize 模式那样耦合
+        self.assertFalse(torch.allclose(grad_h2, grad_ch4, atol=1e-6),
+                         "derive_last 模式下自由组分梯度应独立")
+
+
 if __name__ == "__main__":
     unittest.main()

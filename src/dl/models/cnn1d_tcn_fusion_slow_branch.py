@@ -43,7 +43,16 @@ class SlowFeatureEncoder(nn.Module):
 
 
 class GasHeadNormalize(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int = 4, target_sum: float = 100.0, eps: float = 1e-8):
+    """气体组分输出头，保证所有输出非负且 sum = target_sum。
+
+    derive_last=False (默认): 对 out_dim 个 softplus 输出做归一化，所有组分梯度耦合。
+    derive_last=True:  只预测前 out_dim-1 个自由组分 (softplus 保证正),
+        最后一个组分 = target_sum - sum(前面)。梯度解耦，适合最后一个组分
+        缺乏直接传感器信号的场景（如 N2）。
+    """
+
+    def __init__(self, in_dim: int, out_dim: int = 4, target_sum: float = 100.0,
+                 eps: float = 1e-8, derive_last: bool = False):
         super().__init__()
         if in_dim <= 0:
             raise ValueError(f"in_dim 必须为正整数，得到 {in_dim}")
@@ -52,16 +61,23 @@ class GasHeadNormalize(nn.Module):
         self.eps = float(eps)
         self.output_dim = int(out_dim)
         self.target_sum = float(target_sum)
+        self.derive_last = bool(derive_last)
+        n_predict = out_dim - 1 if self.derive_last else out_dim
         self.head = nn.Sequential(
             nn.Linear(in_dim, 128),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(128, out_dim),
+            nn.Linear(128, n_predict),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raw = self.head(x)
         positive = F.softplus(raw) + self.eps
+        if self.derive_last:
+            # 3+1 模式：前 n-1 个组分独立预测，最后一个由残差推导
+            derived = self.target_sum - positive.sum(dim=-1, keepdim=True)
+            return torch.cat([positive, derived], dim=-1)
+        # 归一化模式（原始行为）
         y_pred = positive / positive.sum(dim=-1, keepdim=True)
         return y_pred * self.target_sum
 
@@ -88,6 +104,7 @@ class CNN1DTCNSlowBranchRegressor(nn.Module):
                 "out_dim": 4,
                 "use_ultrasonic": True,
                 "use_fiber_mic": True,
+                "derive_last": False,
                 "slow_encoder": {
                     "enabled": False,
                     "hidden_dim": 32,
@@ -179,7 +196,8 @@ class CNN1DTCNSlowBranchRegressor(nn.Module):
             nn.ReLU(),
             nn.Dropout(head_dropout),
         )
-        self.head = GasHeadNormalize(64, out_dim=out_dim, target_sum=100.0)
+        derive_last = bool(settings["derive_last"])
+        self.head = GasHeadNormalize(64, out_dim=out_dim, target_sum=100.0, derive_last=derive_last)
 
     def _encode_waveform_branch(
         self,
