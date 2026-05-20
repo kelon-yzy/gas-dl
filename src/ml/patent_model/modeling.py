@@ -48,8 +48,8 @@ class ModelConfig:
     epsilon: float = 0.003
     gamma: str = "scale"
     ridge_alpha: float = 0.8
-    stacking_folds: int = 5
-    n_perturbations: int = 24
+    stacking_folds: int = 3
+    n_perturbations: int = 10
     perturbation_scale: float = 0.04
     uncertainty_floor: float = 1e-6
     include_environment: bool = True

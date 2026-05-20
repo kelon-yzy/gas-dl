@@ -213,7 +213,7 @@ powershell -File experiments\exp03_fusion_grid.ps1
 powershell -File experiments\exp06_reproducibility.ps1
 
 # 传统 ML 单独调度示例：paper_core（默认交互终端自动显示 CLI 进度）
-python src\pipeline\train_traditional.py --data-dir outputs\exp01_traditional --output-root outputs\exp01_traditional --tag formal_seed42_core --seed 42 --profiles v3_raw_no_env v3_raw_tph --combo-list svr_ridge pls_ridge xgboost_ridge --max-workers 1 --n-jobs 2 --xgb-n-jobs 4
+python src\pipeline\train_traditional.py --data-dir outputs\exp01_traditional --output-root outputs\exp01_traditional --tag formal_seed42_core --seed 42 --profiles v3_raw_no_env v3_raw_tph --combo-list svr_ridge pls_ridge xgboost_ridge --max-workers 1 --n-jobs -1 --n-perturbations 10 --stacking-folds 3 --xgb-n-jobs 4
 
 # 传统 ML 新数据集调度示例：使用 waveform_v3_seedpath_formal 的 4 路 split（与 DL 同测试集）
 python src\pipeline\train_traditional.py --data-dir outputs\exp01_traditional_seedpath --output-root outputs\exp01_traditional_seedpath --tag formal_seedpath --seed 42 --split-dir data\waveform_v3_seedpath_formal\splits --profiles v3_raw_no_env v3_raw_tph --combo-list svr_ridge pls_ridge xgboost_ridge --max-workers 4

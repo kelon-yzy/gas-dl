@@ -63,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--seed", type=int, default=42)
   parser.add_argument("--train-limit", type=positive_int)
   parser.add_argument("--test-limit", type=positive_int)
-  parser.add_argument("--n-perturbations", type=positive_int, default=24)
-  parser.add_argument("--stacking-folds", type=positive_int, default=5)
+  parser.add_argument("--n-perturbations", type=positive_int, default=10)
+  parser.add_argument("--stacking-folds", type=positive_int, default=3)
   parser.add_argument("--test-ratio", type=float, default=0.2)
   parser.add_argument("--mc-env-samples", type=int, default=0)
   parser.add_argument("--mc-env-sigma-t", type=float, default=0.5)
@@ -379,4 +379,3 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
 
 if __name__ == "__main__":
   main()
-

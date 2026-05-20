@@ -76,7 +76,8 @@ python "$root\src\pipeline\domain_holdout.py" `
     --profile v3_raw_no_env `
     --combo-list pls_ridge xgboost_xgboost `
     --seed 42 `
-    --n-jobs 2 `
+    --n-perturbations 10 `
+    --n-jobs -1 `
     --xgb-n-jobs 4
 if ($LASTEXITCODE -eq 0) {
     $g3cElapsed = (Get-Date) - $g3cStart

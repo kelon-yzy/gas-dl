@@ -32,7 +32,7 @@ function Test-DeepSeedDone {
 
 function Invoke-TraditionalSeed {
   param([int] $Seed)
-  python "$root\src\pipeline\train_traditional.py" --data-dir $traditionalRoot --output-root $traditionalRoot --tag "repro_seed${Seed}_core" --seed $Seed --max-workers 1 --n-jobs 2 --xgb-n-jobs 4 --combo-list $coreCombos
+  python "$root\src\pipeline\train_traditional.py" --data-dir $traditionalRoot --output-root $traditionalRoot --tag "repro_seed${Seed}_core" --seed $Seed --max-workers 1 --n-jobs -1 --n-perturbations 10 --xgb-n-jobs 4 --combo-list $coreCombos
 }
 
 function Invoke-DeepSeed {
