@@ -37,9 +37,9 @@ model:
 
 training:
   epochs: 150
-  batch_size: 64
+  batch_size: 128
   device: auto
-  amp: false
+  amp: true
   optimizer: adamw
   learning_rate: 0.0002
   weight_decay: 0.01
@@ -48,7 +48,7 @@ training:
   uncertainty_weighted: null
   sum_constraint: null
   early_stopping_patience: 30
-  num_workers: 4
+  num_workers: 8
   eval_num_workers: 2
   grad_clip_norm: 1.0
   cudnn_benchmark: true
