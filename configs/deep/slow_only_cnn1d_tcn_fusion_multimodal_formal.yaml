@@ -1,7 +1,7 @@
 run:
-  name: v3_cnn1d_tcn_fusion_seed42_run_d
+  name: v3_cnn1d_tcn_fusion_seed42
   seed: 42
-  output_dir: outputs/exp02_deep_e2e_tuned/run_d/v3_cnn1d_tcn_fusion_seed42_run_d
+  output_dir: outputs/exp02_deep_e2e/v3_cnn1d_tcn_fusion_seed42
 
 data:
   dataset_type: waveform_v3

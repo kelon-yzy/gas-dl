@@ -12,7 +12,7 @@ def _display_labels(label_names):
     return [str(name).replace("x_", "") for name in label_names]
 
 
-def regression_metrics(y_true, y_pred, epsilon: float = 1e-3, label_names=None) -> tuple[dict, pd.DataFrame]:
+def regression_metrics(y_true, y_pred, label_names=None) -> tuple[dict, pd.DataFrame]:
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.asarray(y_pred, dtype=np.float64)
     if y_true.shape != y_pred.shape:
@@ -29,29 +29,20 @@ def regression_metrics(y_true, y_pred, epsilon: float = 1e-3, label_names=None) 
         mae = float(np.mean(np.abs(err)))
         denom = float(np.sum((y_true[:, i] - np.mean(y_true[:, i])) ** 2))
         r2 = float(1.0 - np.sum(err**2) / denom) if denom > 1e-12 else float("nan")
-        ape = np.abs(err) / np.maximum(np.abs(y_true[:, i]), epsilon) * 100.0
-        mape = float(np.mean(ape))
-        max_ape = float(np.max(ape))
         rows.append(
             {
                 "component": label,
                 "RMSE": rmse,
                 "MAE": mae,
-                "MAPE": mape,
-                "MaxAPE": max_ape,
                 "R2": r2,
-                "MRE": mape / 100.0,
-                "MaxRE": max_ape / 100.0,
             }
         )
         summary[f"{label}_RMSE"] = rmse
         summary[f"{label}_MAE"] = mae
-        summary[f"{label}_MAPE"] = mape
         summary[f"{label}_R2"] = r2
 
     summary["macro_RMSE"] = float(np.mean([row["RMSE"] for row in rows]))
     summary["macro_MAE"] = float(np.mean([row["MAE"] for row in rows]))
-    summary["macro_MAPE"] = float(np.mean([row["MAPE"] for row in rows]))
 
     true_sum = y_true.sum(axis=1)
     pred_sum = y_pred.sum(axis=1)
