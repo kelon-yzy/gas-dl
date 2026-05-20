@@ -55,7 +55,7 @@ training:
     lr_multiplier: 2.0           # 10→2，减缓 sigma 极化
     sigma_clamp: [-1.0, 1.5]     # 限制 log_sigma 范围，防止权重崩塌
   sum_constraint: null
-  early_stopping_patience: 30
+  early_stopping_patience: 15
   num_workers: 8
   eval_num_workers: 2
   grad_clip_norm: 1.0
