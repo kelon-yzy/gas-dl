@@ -1,0 +1,72 @@
+{
+  "method": "z_score",
+  "fit_scope": "train_split_only",
+  "transform_target": "slow",
+  "channel_axis": 2,
+  "modal_groups": {
+    "optical": [
+      "V_NDIR_CH4",
+      "V_NDIR_CO2"
+    ],
+    "thermal": [
+      "V_TCS"
+    ],
+    "environment": [
+      "T_C",
+      "P_MPa",
+      "H_RH",
+      "L_m",
+      "piston_position_m"
+    ]
+  },
+  "modal_stats": {
+    "optical": {
+      "channel_names": [
+        "V_NDIR_CH4",
+        "V_NDIR_CO2"
+      ],
+      "mean": [
+        1.0564016103744507,
+        1.5903557538986206
+      ],
+      "std": [
+        0.7764365673065186,
+        0.6745153665542603
+      ]
+    },
+    "thermal": {
+      "channel_names": [
+        "V_TCS"
+      ],
+      "mean": [
+        1.2102622985839844
+      ],
+      "std": [
+        0.10829973220825195
+      ]
+    },
+    "environment": {
+      "channel_names": [
+        "T_C",
+        "P_MPa",
+        "H_RH",
+        "L_m",
+        "piston_position_m"
+      ],
+      "mean": [
+        25.42862319946289,
+        0.4000073969364166,
+        55.877281188964844,
+        0.79854816198349,
+        0.79854816198349
+      ],
+      "std": [
+        6.005647659301758,
+        0.16748665273189545,
+        15.358317375183105,
+        0.3850121796131134,
+        0.3850121796131134
+      ]
+    }
+  }
+}

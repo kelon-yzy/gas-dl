@@ -61,8 +61,8 @@ PROCESSING_PARAMS = {
     # NDIR 光学链路: CH4 3.31μm, CO2 4.26μm, 短光程避免饱和
     "optical_baseline_ch4_init": 2.5,
     "optical_baseline_co2_init": 2.5,
-    "optical_path_ch4_cm": 0.30,
-    "optical_path_co2_cm": 0.20,
+    "optical_path_ch4_cm": 0.65,
+    "optical_path_co2_cm": 0.26,
     "optical_saturation_absorbance": OPTICAL_SATURATION_ABSORBANCE,
 
     # TCS 热导链路
