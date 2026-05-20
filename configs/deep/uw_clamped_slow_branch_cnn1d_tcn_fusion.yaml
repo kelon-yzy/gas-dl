@@ -1,0 +1,66 @@
+# 实验: UW + sigma_clamp 修复权重崩塌
+# 基线: uw_slow_branch_cnn1d_tcn_fusion.yaml
+# 问题: 原 UW 实验中 N2/CH4 权重崩塌至 0.033 (CO2:N2 = 111:1)，
+#        导致 N2 R²=-0.0003、CH4 R²=0.689，预测退化为均值
+# 修复措施 (方案 1+2):
+#   1. sigma_clamp [-1.0, 1.5] 限制 log_sigma 范围，最大权重比 ≤ e^5 ≈ 148
+#   2. lr_multiplier 10→2，减缓 sigma 参数收敛速度，防止过早极化
+
+run:
+  name: v3_uw_clamped_slow_branch_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_uw_clamped_slow_branch_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_tcn_fusion_slow_branch
+  slow_dim: 8
+  waveform_embedding_dim: 64
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  tcn_channels: [64, 64, 64]
+  tcn_kernel_size: 3
+  tcn_dropout: 0.25
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+  slow_encoder:
+    enabled: true
+    hidden_dim: 32
+    embedding_dim: 64
+
+training:
+  epochs: 150
+  batch_size: 128
+  device: auto
+  amp: true
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: false
+  uncertainty_weighted:
+    num_tasks: 4
+    init_log_sigma: 0.0
+    lr_multiplier: 2.0           # 10→2，减缓 sigma 极化
+    sigma_clamp: [-1.0, 1.5]     # 限制 log_sigma 范围，防止权重崩塌
+  sum_constraint: null
+  early_stopping_patience: 30
+  num_workers: 8
+  eval_num_workers: 2
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 15
+    eta_min: 0.00001

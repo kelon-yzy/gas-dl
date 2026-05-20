@@ -505,5 +505,83 @@ class CodeReviewFixTests(unittest.TestCase):
             )
 
 
+class UncertaintyWeightedLossTests(unittest.TestCase):
+    """UncertaintyWeightedLoss 的 sigma_clamp 和 per-task init 功能回归测试。"""
+
+    def _make_loss(self, **kwargs):
+        from training.losses import UncertaintyWeightedLoss
+        return UncertaintyWeightedLoss(**kwargs)
+
+    def test_sigma_clamp_limits_log_sigma_range(self) -> None:
+        """sigma_clamp 应阻止 log_sigma 超出指定范围。"""
+        loss = self._make_loss(num_tasks=4, init_log_sigma=0.0, sigma_clamp=(-1.0, 1.5))
+        # 手动把 log_sigma 推到极端值
+        with torch.no_grad():
+            loss.log_sigmas.copy_(torch.tensor([-5.0, 10.0, 0.5, -0.5]))
+        clamped = loss._clamped_log_sigmas()
+        self.assertAlmostEqual(clamped[0].item(), -1.0, places=5)
+        self.assertAlmostEqual(clamped[1].item(), 1.5, places=5)
+        self.assertAlmostEqual(clamped[2].item(), 0.5, places=5)
+        self.assertAlmostEqual(clamped[3].item(), -0.5, places=5)
+
+    def test_no_clamp_backward_compatible(self) -> None:
+        """sigma_clamp=None 时行为与原版一致。"""
+        loss = self._make_loss(num_tasks=2, init_log_sigma=0.0, sigma_clamp=None)
+        with torch.no_grad():
+            loss.log_sigmas.copy_(torch.tensor([5.0, -3.0]))
+        clamped = loss._clamped_log_sigmas()
+        self.assertAlmostEqual(clamped[0].item(), 5.0, places=5)
+        self.assertAlmostEqual(clamped[1].item(), -3.0, places=5)
+
+    def test_per_task_init_log_sigma(self) -> None:
+        """per-task 列表初始化应正确设置各组分的初始 log_sigma。"""
+        loss = self._make_loss(num_tasks=4, init_log_sigma=[0.1, 0.2, 0.3, 0.4])
+        for i, expected in enumerate([0.1, 0.2, 0.3, 0.4]):
+            self.assertAlmostEqual(loss.log_sigmas[i].item(), expected, places=5)
+
+    def test_per_task_init_wrong_length_raises(self) -> None:
+        """per-task 列表长度不匹配 num_tasks 时应报错。"""
+        with self.assertRaises(ValueError):
+            self._make_loss(num_tasks=4, init_log_sigma=[0.1, 0.2])
+
+    def test_clamped_forward_produces_finite_loss(self) -> None:
+        """带截断的前向传播应产生有限 loss，且梯度可正常回传。"""
+        loss = self._make_loss(num_tasks=4, init_log_sigma=0.0, sigma_clamp=(-1.0, 1.5))
+        pred = torch.randn(8, 4, requires_grad=True)
+        target = torch.randn(8, 4)
+        out = loss(pred, target)
+        self.assertTrue(torch.isfinite(out).item())
+        out.backward()
+        self.assertIsNotNone(pred.grad)
+        self.assertTrue(torch.all(torch.isfinite(loss.log_sigmas.grad)).item())
+
+    def test_build_loss_with_sigma_clamp(self) -> None:
+        """build_loss 应正确传递 sigma_clamp 到 UncertaintyWeightedLoss。"""
+        from training.losses import build_loss, UncertaintyWeightedLoss
+        loss = build_loss("mse", uncertainty_weighted={
+            "num_tasks": 4,
+            "init_log_sigma": [0.1, 0.2, 0.3, 0.4],
+            "sigma_clamp": [-1.0, 1.5],
+        })
+        self.assertIsInstance(loss, UncertaintyWeightedLoss)
+        self.assertEqual(loss.sigma_clamp, (-1.0, 1.5))
+        self.assertAlmostEqual(loss.log_sigmas[0].item(), 0.1, places=5)
+
+    def test_get_weights_respects_clamp(self) -> None:
+        """get_weights 和 get_sigmas 应使用截断后的值。"""
+        loss = self._make_loss(num_tasks=2, init_log_sigma=0.0, sigma_clamp=(-1.0, 1.0))
+        with torch.no_grad():
+            loss.log_sigmas.copy_(torch.tensor([5.0, -5.0]))
+        weights = loss.get_weights()
+        sigmas = loss.get_sigmas()
+        # 被截断到 1.0 和 -1.0
+        expected_w_max = torch.exp(torch.tensor(-2.0 * (-1.0))).item()
+        expected_w_min = torch.exp(torch.tensor(-2.0 * 1.0)).item()
+        self.assertAlmostEqual(weights[1].item(), expected_w_max, places=4)
+        self.assertAlmostEqual(weights[0].item(), expected_w_min, places=4)
+        self.assertAlmostEqual(sigmas[0].item(), torch.exp(torch.tensor(1.0)).item(), places=4)
+        self.assertAlmostEqual(sigmas[1].item(), torch.exp(torch.tensor(-1.0)).item(), places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,32 +26,54 @@ class UncertaintyWeightedLoss(torch.nn.Module):
 
     log_σ_i 作为可学参数与模型一起优化，自动平衡各组分权重。
     正则项 log_σ_i 防止权重塌缩（σ→∞ 使某组分loss为0）。
+
+    sigma_clamp: (min, max) 截断范围，防止 log_sigma 跑到极端值导致
+        某些组分权重趋近于零。默认 None 不截断（向后兼容）。
     """
 
-    def __init__(self, num_tasks: int = 4, init_log_sigma: float = 0.0):
+    def __init__(
+        self,
+        num_tasks: int = 4,
+        init_log_sigma: float | list[float] = 0.0,
+        sigma_clamp: tuple[float, float] | None = None,
+    ):
         super().__init__()
-        # 初始化 log_sigma，默认为0 → σ=1 → 权重=0.5（各组分初始等权）
-        self.log_sigmas = torch.nn.Parameter(
-            torch.full((num_tasks,), init_log_sigma, dtype=torch.float32)
-        )
+        # 支持标量（所有 task 相同）或 per-task 列表
+        if isinstance(init_log_sigma, (list, tuple)):
+            if len(init_log_sigma) != num_tasks:
+                raise ValueError(
+                    f"init_log_sigma 长度 ({len(init_log_sigma)}) 必须与 num_tasks ({num_tasks}) 一致"
+                )
+            init_vals = torch.tensor(init_log_sigma, dtype=torch.float32)
+        else:
+            init_vals = torch.full((num_tasks,), float(init_log_sigma), dtype=torch.float32)
+        self.log_sigmas = torch.nn.Parameter(init_vals)
+        self.sigma_clamp = sigma_clamp
+
+    def _clamped_log_sigmas(self) -> torch.Tensor:
+        if self.sigma_clamp is None:
+            return self.log_sigmas
+        return torch.clamp(self.log_sigmas, min=self.sigma_clamp[0], max=self.sigma_clamp[1])
 
     def forward(self, pred, target):
         # 逐组分计算 MSE：shape (batch, num_tasks) → 对 batch 求均值 → (num_tasks,)
         per_task_mse = ((pred - target) ** 2).mean(dim=0)
+        # 截断 log_sigma 防止权重极化
+        log_sigmas = self._clamped_log_sigmas()
         # 加权 loss：precision * mse + 正则项
-        precision = torch.exp(-2.0 * self.log_sigmas)
-        weighted = 0.5 * precision * per_task_mse + self.log_sigmas
+        precision = torch.exp(-2.0 * log_sigmas)
+        weighted = 0.5 * precision * per_task_mse + log_sigmas
         return weighted.sum()
 
     def get_weights(self) -> torch.Tensor:
         """返回当前各组分的有效权重 (precision = 1/(2σ²))，用于监控。"""
         with torch.no_grad():
-            return torch.exp(-2.0 * self.log_sigmas)
+            return torch.exp(-2.0 * self._clamped_log_sigmas())
 
     def get_sigmas(self) -> torch.Tensor:
         """返回当前各组分的 σ 值。"""
         with torch.no_grad():
-            return torch.exp(self.log_sigmas)
+            return torch.exp(self._clamped_log_sigmas())
 
 
 class WeightedL1Loss(torch.nn.Module):
@@ -109,8 +131,17 @@ def build_loss(
     # 优先使用可学习不确定性加权
     if uncertainty_weighted:
         num_tasks = int(uncertainty_weighted.get("num_tasks", 4))
-        init_log_sigma = float(uncertainty_weighted.get("init_log_sigma", 0.0))
-        base_loss = UncertaintyWeightedLoss(num_tasks=num_tasks, init_log_sigma=init_log_sigma)
+        raw_init = uncertainty_weighted.get("init_log_sigma", 0.0)
+        # 支持标量或 per-task 列表
+        if isinstance(raw_init, (list, tuple)):
+            init_log_sigma: float | list[float] = [float(v) for v in raw_init]
+        else:
+            init_log_sigma = float(raw_init)
+        raw_clamp = uncertainty_weighted.get("sigma_clamp")
+        sigma_clamp = tuple(float(v) for v in raw_clamp) if raw_clamp else None
+        base_loss = UncertaintyWeightedLoss(
+            num_tasks=num_tasks, init_log_sigma=init_log_sigma, sigma_clamp=sigma_clamp,
+        )
     elif label_weights is not None:
         if normalized == "mse":
             base_loss = WeightedMSELoss(label_weights)
