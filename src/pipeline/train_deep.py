@@ -28,7 +28,7 @@ def _resolve_project_output_dir(value: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a deep-learning config for V3.1 dual-channel data.")
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config", default="configs/deep/uncertainty_weighted_cnn1d_tcn_fusion.yaml")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output-root", default=None)

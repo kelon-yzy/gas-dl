@@ -439,6 +439,9 @@ def _restore_clean_state_after_interrupt(ctx: TrainExecutionContext) -> None:
     ctx.model.load_state_dict(ckpt_clean["model_state_dict"])
     ctx.optimizer.load_state_dict(ckpt_clean["optimizer_state_dict"])
     ctx.scaler.load_state_dict(ckpt_clean["amp_scaler_state_dict"])
+    loss_fn_state = ckpt_clean.get("loss_fn_state_dict")
+    if loss_fn_state is not None and hasattr(ctx.loss_fn, "load_state_dict"):
+        ctx.loss_fn.load_state_dict(loss_fn_state)
 
 
 def _build_epoch_request(ctx: TrainExecutionContext) -> TrainEpochRequest:

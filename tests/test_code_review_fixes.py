@@ -3,6 +3,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -20,6 +21,7 @@ from patent_model.dataset import PatentDataset
 from patent_model.fault_labels import inject_faults
 from patent_model.modeling import ModelConfig, TraditionalFusionModel
 from patent_model.robustness import add_environment_noise, add_profile_environment_noise, select_pressure_slice
+from training.orchestrator import _restore_clean_state_after_interrupt
 from training.seed import set_seed
 from training.train import TrainEpochRequest, _ensure_scaler_path, _forward_batch, _train_one_epoch, evaluate_loss, evaluate_with_predictions
 
@@ -111,6 +113,89 @@ class CodeReviewFixTests(unittest.TestCase):
         _ensure_scaler_path(data_config, output_dir)
 
         self.assertEqual(data_config["scaler_path"], str(output_dir / "scaler_slow_sequence.json"))
+
+    def test_interrupt_restore_restores_loss_fn_state(self) -> None:
+        tmp = tempfile.mkdtemp()
+        try:
+            checkpoint_path = pathlib.Path(tmp) / "last_checkpoint.pt"
+            checkpoint_path.write_text("exists", encoding="utf-8")
+            model = torch.nn.Linear(1, 1)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+            scaler = torch.amp.GradScaler("cuda", enabled=False)
+            loss_fn = torch.nn.Linear(1, 1, bias=False)
+            with torch.no_grad():
+                loss_fn.weight.fill_(5.0)
+            restored_loss = torch.nn.Linear(1, 1, bias=False)
+            with torch.no_grad():
+                restored_loss.weight.fill_(2.0)
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "amp_scaler_state_dict": scaler.state_dict(),
+                "loss_fn_state_dict": restored_loss.state_dict(),
+            }
+            ctx = SimpleNamespace(
+                progress=None,
+                current_run_last_checkpoint_written=True,
+                last_ckpt_path=checkpoint_path,
+                initial_ckpt_path=checkpoint_path,
+                dependencies=SimpleNamespace(load_checkpoint=lambda path, device: checkpoint),
+                device=torch.device("cpu"),
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                loss_fn=loss_fn,
+            )
+
+            _restore_clean_state_after_interrupt(ctx)
+
+            self.assertAlmostEqual(float(loss_fn.weight.item()), 2.0)
+
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_grad_clip_covers_loss_fn_optimizer_parameters(self) -> None:
+        class TinyModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.tensor([[1.0]]))
+
+            def forward(self, x):
+                return x @ self.weight
+
+        class LossWithParameter(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.loss_weight = torch.nn.Parameter(torch.tensor(1.0))
+
+            def forward(self, pred, target):
+                return pred.sum() * 1000.0 + self.loss_weight * 1000.0
+
+        model = TinyModel()
+        loss_fn = LossWithParameter()
+        optimizer = torch.optim.SGD(
+            [
+                {"params": model.parameters()},
+                {"params": loss_fn.parameters()},
+            ],
+            lr=0.0,
+        )
+        request = TrainEpochRequest(
+            model=model,
+            loader=[(torch.ones((1, 1)), torch.zeros((1, 1)), {"sample_id": ["S1"]})],
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            device=torch.device("cpu"),
+            dataset=SimpleNamespace(input_format="NTC"),
+            env_aug_sigma=0.0,
+            amp_enabled=False,
+            scaler=None,
+            grad_clip_norm=1.0,
+        )
+
+        _train_one_epoch(request=request)
+
+        self.assertLessEqual(float(loss_fn.loss_weight.grad.abs().item()), 1.0)
 
     def test_v2_dataset_uses_preloaded_data_without_reloading_npz(self) -> None:
         data = {

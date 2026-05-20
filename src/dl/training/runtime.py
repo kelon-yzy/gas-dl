@@ -142,6 +142,19 @@ def _mean_loss(total_loss: float, total_samples: int) -> float:
     return float(total_loss / total_samples)
 
 
+def _optimizer_parameters(optimizer) -> list[torch.nn.Parameter]:
+    params = []
+    seen = set()
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            ident = id(param)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            params.append(param)
+    return params
+
+
 def apply_environment_augmentation(x: torch.Tensor, input_format: str, sigma: float) -> torch.Tensor:
     if sigma <= 0.0:
         return x
@@ -239,13 +252,13 @@ def _train_one_epoch(request: TrainEpochRequest) -> float:
             scaler.scale(loss).backward()
             if request.grad_clip_norm > 0:
                 scaler.unscale_(request.optimizer)
-                torch.nn.utils.clip_grad_norm_(request.model.parameters(), request.grad_clip_norm)
+                torch.nn.utils.clip_grad_norm_(_optimizer_parameters(request.optimizer), request.grad_clip_norm)
             scaler.step(request.optimizer)
             scaler.update()
         else:
             loss.backward()
             if request.grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(request.model.parameters(), request.grad_clip_norm)
+                torch.nn.utils.clip_grad_norm_(_optimizer_parameters(request.optimizer), request.grad_clip_norm)
             request.optimizer.step()
         batch_size = int(y.shape[0])
         total_loss += float(loss.item()) * batch_size

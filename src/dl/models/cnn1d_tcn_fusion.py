@@ -95,12 +95,14 @@ class DeepAcousticEncoder1D(nn.Module):
             raise ValueError(f"waveform_int16 必须为 2D [N, L]，得到 {tuple(waveform_int16.shape)}")
         if scale_factor.ndim != 1 or scale_factor.shape[0] != waveform_int16.shape[0]:
             raise ValueError("scale_factor 必须为 1D 且与 waveform_int16 的 batch 维一致")
+        if torch.any(scale_factor <= 0).item():
+            raise ValueError("scale_factor 必须全部为正数")
         with _maybe_disable_autocast(waveform_int16.device):
             # 方案 B：用固定常数 ADC 满量程归一化，把波形形状压到 [-1, 1]；
             # 卷积分支不再消费物理电压幅值，绝对幅值通过 log_scale 标量旁路保留。
             # 与 AcousticWaveformEncoder 主线策略一致，避免输入语义分裂。
             waveform = waveform_int16.to(torch.float32) / _ADC_MAX_INT16
-            log_scale = torch.log(scale_factor.to(torch.float32).clamp_min(1e-12)).unsqueeze(-1)
+            log_scale = torch.log(scale_factor.to(torch.float32)).unsqueeze(-1)
             feat = self.features(waveform.unsqueeze(1))
             avg = self.avg_pool(feat).squeeze(-1)
             mx = self.max_pool(feat).squeeze(-1)

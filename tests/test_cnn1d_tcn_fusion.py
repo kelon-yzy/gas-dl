@@ -171,6 +171,13 @@ class DeepAcousticEncoder1DTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             encoder(wave, bad_scale)
 
+    def test_nonpositive_scale_factor_raises(self):
+        encoder = DeepAcousticEncoder1D()
+        wave = torch.randint(0, 32768, (2, 1000), dtype=torch.int16)
+        bad_scale = torch.tensor([1.0, 0.0], dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "scale_factor"):
+            encoder(wave, bad_scale)
+
 
 if __name__ == "__main__":
     unittest.main()
