@@ -500,15 +500,21 @@ def _should_write_last_ckpt(ctx: TrainExecutionContext, epoch: int) -> bool:
     return (epoch % interval) == 0
 
 
+def _find_uw_loss(loss_fn):
+    """从 loss_fn（可能被 SlicedLoss/SumConstraintLoss 包裹）中找到 UncertaintyWeightedLoss。"""
+    from training.losses import UncertaintyWeightedLoss
+    if isinstance(loss_fn, UncertaintyWeightedLoss):
+        return loss_fn
+    # SlicedLoss 或 SumConstraintLoss 都有 base_loss 属性
+    base = getattr(loss_fn, "base_loss", None)
+    if base is not None:
+        return _find_uw_loss(base)
+    return None
+
+
 def _get_uncertainty_info(loss_fn) -> dict:
     """从 loss_fn 中提取 UncertaintyWeightedLoss 的当前权重信息。"""
-    from training.losses import UncertaintyWeightedLoss
-    # 可能直接是 UncertaintyWeightedLoss，也可能被 SumConstraintLoss 包裹
-    uw_loss = None
-    if isinstance(loss_fn, UncertaintyWeightedLoss):
-        uw_loss = loss_fn
-    elif hasattr(loss_fn, "base_loss") and isinstance(loss_fn.base_loss, UncertaintyWeightedLoss):
-        uw_loss = loss_fn.base_loss
+    uw_loss = _find_uw_loss(loss_fn)
     if uw_loss is None:
         return {}
     sigmas = uw_loss.get_sigmas().cpu().numpy()
@@ -517,6 +523,34 @@ def _get_uncertainty_info(loss_fn) -> dict:
         "uw_sigmas": [float(s) for s in sigmas],
         "uw_weights": [float(w) for w in weights],
     }
+
+
+def _get_sigma_warmup_delay(config: dict) -> int:
+    """确定 sigma 参数的延迟启动 epoch 数。
+
+    UW + warmup 组合会导致 sigma 在模型还未学习时就膨胀，压制模型梯度信号。
+    默认在 warmup 结束后才开始更新 sigma，让模型先建立基础表征。
+    """
+    uw_cfg = config["training"].get("uncertainty_weighted")
+    if not uw_cfg:
+        return 0
+    # 显式配置优先
+    explicit = uw_cfg.get("sigma_start_epoch")
+    if explicit is not None:
+        return int(explicit)
+    # 默认跟随 warmup_epochs
+    scheduler_cfg = config["training"].get("lr_scheduler") or {}
+    if scheduler_cfg.get("type", "cosine_warmup") == "cosine_warmup":
+        return int(scheduler_cfg.get("warmup_epochs", 5))
+    return 0
+
+
+def _set_sigma_frozen(loss_fn, frozen: bool) -> None:
+    """冻结或解冻 UW sigma 参数的梯度。"""
+    uw_loss = _find_uw_loss(loss_fn)
+    if uw_loss is None:
+        return
+    uw_loss.log_sigmas.requires_grad_(not frozen)
 
 
 def _record_epoch_result(ctx: TrainExecutionContext, epoch: int, result: EpochResult) -> None:
@@ -576,8 +610,19 @@ def _should_pause_after_epoch(ctx: TrainExecutionContext, epoch: int) -> bool:
 
 
 def _run_training_epochs(ctx: TrainExecutionContext) -> bool:
+    # sigma warmup delay：warmup 期间冻结 UW sigma，防止 sigma 膨胀压制模型梯度
+    sigma_delay = _get_sigma_warmup_delay(ctx.config)
+    if sigma_delay > 0 and ctx.start_epoch <= sigma_delay:
+        _set_sigma_frozen(ctx.loss_fn, frozen=True)
+        if ctx.progress is not None:
+            ctx.progress.log_message(f"UW sigma 冻结至 epoch {sigma_delay}（warmup delay）")
     try:
         for epoch in range(ctx.start_epoch, ctx.total_epochs + 1):
+            # 到达 sigma_start_epoch 时解冻 sigma 参数
+            if sigma_delay > 0 and epoch == sigma_delay + 1:
+                _set_sigma_frozen(ctx.loss_fn, frozen=False)
+                if ctx.progress is not None:
+                    ctx.progress.log_message(f"UW sigma 解冻，开始自适应权重学习")
             epoch_started = perf_counter()
             do_val = _should_validate_this_epoch(ctx, epoch)
             train_loss, val_loss, val_summary = _run_training_epoch(ctx, do_val)
