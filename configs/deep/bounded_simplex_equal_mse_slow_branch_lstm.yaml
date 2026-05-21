@@ -49,7 +49,7 @@ training:
   amp: true
   compile: false                 # torch.compile + bounded_simplex 梯度失效，暂禁
   optimizer: adamw
-  learning_rate: 0.00015
+  learning_rate: 0.0002
   weight_decay: 0.01
   loss: mse
   label_balanced_loss: false
@@ -63,5 +63,5 @@ training:
   cudnn_benchmark: true
   lr_scheduler:
     type: cosine_warmup
-    warmup_epochs: 20
+    warmup_epochs: 15
     eta_min: 0.00001
