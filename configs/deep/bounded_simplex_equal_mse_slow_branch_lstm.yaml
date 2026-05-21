@@ -48,7 +48,7 @@ training:
   device: auto
   amp: true
   optimizer: adamw
-  learning_rate: 0.0002
+  learning_rate: 0.00015
   weight_decay: 0.01
   loss: mse
   label_balanced_loss: false
@@ -62,5 +62,5 @@ training:
   cudnn_benchmark: true
   lr_scheduler:
     type: cosine_warmup
-    warmup_epochs: 15
+    warmup_epochs: 20
     eta_min: 0.00001
