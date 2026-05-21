@@ -1,0 +1,68 @@
+# 消融实验: bounded_simplex + 3-task loss (只监督 H2/CH4/CO2)
+# 核心假设: CH4-N2 误差高度相关 (corr=-0.93) 源自 derive_last 结构下
+#   N2 loss 梯度反传到 CH4/CO2/H2 导致的梯度耦合。
+#   去掉 N2 loss 后，模型只优化三个自由头的精度，N2 精度自然由 100-sum 决定。
+# 预期: CH4 R² 显著提升（消除 N2 loss 对 CH4 梯度的干扰），
+#   N2 R² 至少与等权 4-task loss 持平（因前三项更准确）。
+# 对照:
+#   - bounded_simplex_equal_mse (4-task): N2 R²=0.615, CH4 R²=0.874
+#   - slow_branch_equal_MSE (旧 normalize): N2 R²=0.632, CH4 R²=0.861
+
+run:
+  name: v3_bounded_simplex_3task_loss_slow_branch_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_bounded_simplex_3task_loss_slow_branch_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_tcn_fusion_slow_branch
+  slow_dim: 8
+  waveform_embedding_dim: 64
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  tcn_channels: [64, 64, 64]
+  tcn_kernel_size: 3
+  tcn_dropout: 0.25
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+  derive_last: true              # 3+1: H2/CH4/CO2 自由预测，N2 = 100 - sum(三者)
+  derive_last_mode: bounded_simplex
+  output_prior: [9.288469, 75.755157, 4.994778, 9.961745]
+  slow_encoder:
+    enabled: true
+    hidden_dim: 32
+    embedding_dim: 64
+
+training:
+  epochs: 150
+  batch_size: 128
+  device: auto
+  amp: true
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: false
+  uncertainty_weighted: null
+  loss_columns: 3                 # 关键: 只对前 3 列 (H2/CH4/CO2) 计算 MSE loss
+  sum_constraint: null            # bounded_simplex 已保证 sum=100
+  early_stopping_patience: 30
+  num_workers: 12
+  eval_num_workers: 4
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 15
+    eta_min: 0.00001

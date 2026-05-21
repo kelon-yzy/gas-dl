@@ -91,6 +91,23 @@ class WeightedL1Loss(torch.nn.Module):
         return (abs_err * self.weights.to(abs_err.dtype).to(abs_err.device)).mean()
 
 
+class SlicedLoss(torch.nn.Module):
+    """只对前 N 列计算 loss，忽略剩余列。
+
+    用于 derive_last 模式下的 3-task loss：只监督 H2/CH4/CO2 自由预测头，
+    N2 = 100 - sum(三者) 的精度由前三项隐式决定，不施加额外梯度。
+    这消除了 N2 loss 对 CH4 的反向梯度耦合（corr(CH4_err, N2_err)=-0.93）。
+    """
+
+    def __init__(self, base_loss: torch.nn.Module, num_columns: int):
+        super().__init__()
+        self.base_loss = base_loss
+        self.num_columns = int(num_columns)
+
+    def forward(self, pred, target):
+        return self.base_loss(pred[:, :self.num_columns], target[:, :self.num_columns])
+
+
 class SumConstraintLoss(torch.nn.Module):
     def __init__(self, base_loss: torch.nn.Module, weight: float = 0.0, target_sum: float = 100.0, penalty: str = "mse"):
         super().__init__()
@@ -120,11 +137,14 @@ def build_loss(
     sum_constraint: dict | None = None,
     label_weights: torch.Tensor | None = None,
     uncertainty_weighted: dict | None = None,
+    loss_columns: int | None = None,
 ):
     """构建 loss 函数。
 
     参数优先级：uncertainty_weighted > label_weights > 默认等权。
     当使用 uncertainty_weighted 时，忽略 label_weights（因为权重是自动学习的）。
+
+    loss_columns: 若指定，只对前 N 列计算 loss（用于 derive_last 3-task loss）。
     """
     normalized = name.lower()
 
@@ -156,6 +176,10 @@ def build_loss(
             base_loss = torch.nn.L1Loss()
         else:
             raise ValueError(f"Unknown loss: {name}")
+
+    # 3-task loss：只对前 N 列计算梯度，派生列不参与 loss
+    if loss_columns is not None:
+        base_loss = SlicedLoss(base_loss, num_columns=loss_columns)
 
     if not sum_constraint:
         return base_loss

@@ -1,13 +1,14 @@
-# 消融实验: bounded_simplex + 等权 MSE + slow_branch LSTM
-# 目的: 在保持 slow_branch / bounded_simplex / 等权 MSE 不变的前提下，
-#   仅将时序融合器从 TCN 替换为 LSTM，和 TCN 对照实验做结构等价比较。
+# 消融实验: bounded_simplex + 3-task loss + slow_branch LSTM
+# 目的: LSTM 时序融合器 + 3-task loss (只监督 H2/CH4/CO2，N2 由 100-sum 推导)
+#   消除 N2 loss 对 CH4 的反向梯度耦合。
 # 基线对照:
-#   - bounded_simplex_equal_mse_slow_branch.yaml (TCN slow_branch)
+#   - bounded_simplex_3task_loss_slow_branch.yaml (TCN + 3-task)
+#   - bounded_simplex_equal_mse_slow_branch.yaml (TCN + 4-task)
 
 run:
-  name: v3_bounded_simplex_equal_mse_slow_branch_lstm_seed42
+  name: v3_bounded_simplex_3task_loss_slow_branch_lstm_seed42
   seed: 42
-  output_dir: outputs/exp02_deep_e2e/v3_bounded_simplex_equal_mse_slow_branch_lstm_seed42
+  output_dir: outputs/exp02_deep_e2e/v3_bounded_simplex_3task_loss_slow_branch_lstm_seed42
 
 data:
   dataset_type: waveform_v3
@@ -52,6 +53,7 @@ training:
   loss: mse
   label_balanced_loss: false
   uncertainty_weighted: null
+  loss_columns: 3                 # 只对前 3 列 (H2/CH4/CO2) 计算 loss，N2 无梯度
   sum_constraint: null
   early_stopping_patience: 30
   num_workers: 12

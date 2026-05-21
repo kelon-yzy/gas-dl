@@ -245,6 +245,7 @@ def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bo
         sum_constraint=config["training"].get("sum_constraint"),
         label_weights=label_weights,
         uncertainty_weighted=config["training"].get("uncertainty_weighted"),
+        loss_columns=config["training"].get("loss_columns"),
     )
     # 将 loss_fn 移到设备上（UncertaintyWeightedLoss 含可学参数）
     loss_fn = loss_fn.to(device)
