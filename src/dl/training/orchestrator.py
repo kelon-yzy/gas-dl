@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
@@ -9,6 +10,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+
+# 屏蔽 PyTorch Inductor / Triton 内部无害警告（非用户代码可控）
+warnings.filterwarnings("ignore", message=".*Online softmax is disabled.*")
+warnings.filterwarnings("ignore", message=".*Logical operators.*deprecated.*non-scalar tensors.*")
+warnings.filterwarnings("ignore", message=".*Enable tracemalloc.*")
 from models.registry import build_model
 from training.checkpoints import CheckpointBuildContext, _checkpoint_payload, _load_checkpoint, _restore_early_stopping, _restore_rng_state, _save_checkpoint, _validate_checkpoint_compat
 from training.data_setup import _ensure_scaler_path, _load_label_names, build_datasets, load_config, resolve_path
