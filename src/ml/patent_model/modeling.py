@@ -27,16 +27,21 @@ from patent_model.logging_utils import get_logger
 logger = get_logger(__name__)
 
 
-def _resolve_worker_count(n_jobs: int, task_count: int) -> int:
-    """把 n_jobs（含 -1）翻译成实际线程数，并按任务数封顶。"""
+def _resolve_worker_count(n_jobs: int, task_count: int, inner_threads: int = 1) -> int:
+    """把 n_jobs（含 -1）翻译成实际线程数，并按任务数封顶。
+
+    inner_threads: 每个任务内部已占用的线程数，用于避免过度竞争。
+    """
 
     if task_count <= 1:
         return 1
     if n_jobs is None or n_jobs == 0:
         return 1
+    cpu = os.cpu_count() or 1
     if n_jobs < 0:
-        cpu = os.cpu_count() or 1
-        return max(1, min(task_count, cpu))
+        # 按 总核心数 / 内部线程数 分配外层并行度
+        effective = max(1, cpu // inner_threads)
+        return max(1, min(task_count, effective))
     return max(1, min(task_count, n_jobs))
 
 
@@ -61,7 +66,7 @@ class ModelConfig:
     xgb_max_depth: int = 5
     xgb_learning_rate: float = 0.05
     xgb_device: str = "cpu"
-    xgb_n_jobs: int = 1
+    xgb_n_jobs: int = 4
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
     xgb_reg_alpha: float = 0.1
@@ -121,7 +126,10 @@ def _make_modal_pipeline(config: ModelConfig, features: np.ndarray | None = None
     """为四输出模态模型构造回归流水线。"""
 
     if config.branch_model_type == "svr":
-        estimator = MultiOutputRegressor(SVR(kernel="rbf", C=config.C, epsilon=config.epsilon, gamma=config.gamma))
+        estimator = MultiOutputRegressor(
+            SVR(kernel="rbf", C=config.C, epsilon=config.epsilon, gamma=config.gamma),
+            n_jobs=min(4, config.n_jobs) if config.n_jobs > 0 else 4,
+        )
         return Pipeline(
             [
                 ("scaler", StandardScaler()),
@@ -319,7 +327,9 @@ class TraditionalFusionModel:
             model = SingleModalityMultiOutputModel(self.config, branch_name).fit(inputs[branch_name], dataset.targets)
             return branch_name, model
 
-        n_workers = _resolve_worker_count(self.config.n_jobs, len(BRANCH_NAMES))
+        # SVR: 每个分支内 MultiOutputRegressor 用 4 线程; XGBoost: 每个分支用 xgb_n_jobs 线程
+        inner = self.config.xgb_n_jobs if self.config.branch_model_type == "xgboost" else 4
+        n_workers = _resolve_worker_count(self.config.n_jobs, len(BRANCH_NAMES), inner_threads=inner)
         if n_workers > 1:
             fitted_results = Parallel(n_jobs=n_workers, prefer="threads")(delayed(_fit_modal)(branch_name) for branch_name in BRANCH_NAMES)
         else:
@@ -379,15 +389,41 @@ class TraditionalFusionModel:
         splitter = GroupKFold(n_splits=n_splits, shuffle=True, random_state=self.config.random_state)
         splits = list(splitter.split(first_input, targets, groups))
 
-        def _process_fold(fold_idx: int, train_idx: np.ndarray, valid_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Phase 1: 将 fold×branch 展平为独立训练任务，充分利用多核
+        def _fit_one_branch(fold_idx: int, branch_name: str, train_idx: np.ndarray) -> tuple[int, str, SingleModalityMultiOutputModel]:
+            model = SingleModalityMultiOutputModel(self.config, branch_name).fit(
+                inputs[branch_name][train_idx],
+                targets[train_idx],
+            )
+            return fold_idx, branch_name, model
+
+        # fold×branch = n_splits×3 个独立任务
+        fit_tasks = [
+            (fold_idx, branch_name, train_idx)
+            for fold_idx, (train_idx, _) in enumerate(splits)
+            for branch_name in BRANCH_NAMES
+        ]
+        n_fit_tasks = len(fit_tasks)
+        inner = self.config.xgb_n_jobs if self.config.branch_model_type == "xgboost" else 4
+        n_workers = _resolve_worker_count(self.config.n_jobs, n_fit_tasks, inner_threads=inner)
+        if n_workers > 1:
+            fit_results = Parallel(n_jobs=n_workers, prefer="threads")(
+                delayed(_fit_one_branch)(fold_idx, branch_name, train_idx)
+                for fold_idx, branch_name, train_idx in fit_tasks
+            )
+        else:
+            fit_results = [_fit_one_branch(*task) for task in fit_tasks]
+
+        # 按 fold 重组已训练模型
+        fold_models: dict[int, dict[str, SingleModalityMultiOutputModel]] = {i: {} for i in range(len(splits))}
+        for fold_idx, branch_name, model in fit_results:
+            fold_models[fold_idx][branch_name] = model
+
+        # Phase 2: 预测 + 动态权重计算（计算量小，串行即可）
+        for fold_idx, (train_idx, valid_idx) in enumerate(splits):
             train_inputs = {name: values[train_idx] for name, values in inputs.items()}
             valid_inputs = {name: values[valid_idx] for name, values in inputs.items()}
-            fitted: dict[str, SingleModalityMultiOutputModel] = {}
-            for branch_name in BRANCH_NAMES:
-                fitted[branch_name] = SingleModalityMultiOutputModel(self.config, branch_name).fit(
-                    train_inputs[branch_name],
-                    targets[train_idx],
-                )
+            fitted = fold_models[fold_idx]
             base_valid = np.stack([fitted[name].predict(valid_inputs[name]) for name in BRANCH_NAMES], axis=2)
             weight_valid = _compute_modal_dynamic_weights(
                 valid_inputs,
@@ -397,20 +433,6 @@ class TraditionalFusionModel:
                 self.config,
                 seed_offset=fold_idx + 1,
             )
-            return valid_idx, base_valid, weight_valid
-
-        n_workers = _resolve_worker_count(self.config.n_jobs, len(splits))
-        if n_workers > 1:
-            fold_results = Parallel(n_jobs=n_workers, prefer="threads")(
-                delayed(_process_fold)(fold_idx, train_idx, valid_idx)
-                for fold_idx, (train_idx, valid_idx) in enumerate(splits)
-            )
-        else:
-            fold_results = [
-                _process_fold(fold_idx, train_idx, valid_idx)
-                for fold_idx, (train_idx, valid_idx) in enumerate(splits)
-            ]
-        for valid_idx, base_valid, weight_valid in fold_results:
             base[valid_idx] = base_valid
             weights[valid_idx] = weight_valid
         return base, weights

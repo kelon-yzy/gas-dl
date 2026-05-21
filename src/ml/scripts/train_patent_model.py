@@ -1,5 +1,7 @@
 """训练主脚本：读取数据、训练模型并导出结果。"""
 
+from __future__ import annotations
+
 import argparse
 from dataclasses import dataclass
 import json
@@ -14,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from patent_model.sklearnex_patch import patch_sklearn_for_traditional_ml
+
 from patent_model.config import BRANCH_NAMES
 from patent_model.data_loader import grouped_train_test_split, load_patent_dataset
 from patent_model.dataset import PatentDataset
@@ -22,16 +26,18 @@ from patent_model.feature_profiles import FEATURE_PROFILES, has_embedded_environ
 from patent_model.fault_labels import build_observed_fault_labels
 from patent_model.logging_utils import get_logger
 from patent_model.model_config_builder import build_model_config
-from patent_model.modeling import (
-    ModalBranchArtifacts,
-    TraditionalFusionModel,
-    TraditionalFusionPrediction,
-    TraditionalPredictionCache,
-)
 from scripts._cli_utils import limit_dataset, positive_int
 
 
 logger = get_logger(__name__)
+
+
+def _load_traditional_fusion_model():
+    if "patent_model.modeling" not in sys.modules:
+        patch_sklearn_for_traditional_ml()
+    from patent_model.modeling import TraditionalFusionModel
+
+    return TraditionalFusionModel
 
 
 @dataclass(frozen=True)
@@ -67,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xgb-max-depth", type=positive_int, default=5, help="XGBoost max tree depth.")
     parser.add_argument("--xgb-learning-rate", type=float, default=0.05, help="XGBoost learning rate.")
     parser.add_argument("--xgb-device", default="cpu", help="XGBoost device, e.g. cpu or cuda.")
-    parser.add_argument("--xgb-n-jobs", type=positive_int, default=1, help="XGBoost worker threads per model.")
+    parser.add_argument("--xgb-n-jobs", type=int, default=4, help="XGBoost worker threads per model (-1=all cores).")
     parser.add_argument("--n-jobs", type=int, default=-1, help="并行训练线程数（fold/分支/组分维度复用）。-1 表示按 cpu_count 分配；1 退化串行。")
     parser.add_argument("--mc-env-samples", type=int, default=0, help="Offline MC environment augmentation copies for derived_env training.")
     parser.add_argument("--mc-env-sigma-t", type=float, default=0.5, help="Temperature noise sigma in deg C for MC environment augmentation.")
@@ -321,6 +327,7 @@ def run_training(
             total=progress_context.get('total'),
         )
     fit_started = perf_counter()
+    TraditionalFusionModel = _load_traditional_fusion_model()
     model = TraditionalFusionModel(config=config, component_names=prepared_data.train.component_names).fit(
         prepared_data.train,
         branch_artifacts=branch_artifacts,

@@ -25,7 +25,7 @@ def add_model_args(parser: argparse.ArgumentParser, positive_int_type: Callable[
     parser.add_argument("--xgb-max-depth", type=positive_int_type, default=5)
     parser.add_argument("--xgb-learning-rate", type=float, default=0.05)
     parser.add_argument("--xgb-device", default="cpu")
-    parser.add_argument("--xgb-n-jobs", type=positive_int_type, default=1)
+    parser.add_argument("--xgb-n-jobs", type=int, default=4)
     parser.add_argument("--n-jobs", type=int, default=-1)
 
 

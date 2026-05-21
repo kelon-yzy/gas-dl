@@ -1,0 +1,67 @@
+# 消融实验: bounded_simplex + 等权 MSE (无 UW)
+# 目的: 隔离 bounded_simplex 参数化的贡献
+#   - 保留 derive_last_mode: bounded_simplex (保证 sum=100、全组分非负)
+#   - 关闭 uncertainty_weighted，使用 torch.nn.MSELoss 等权训练
+#   - 与 v3_uw_clamped_bounded_derive_last_slow_branch_seed42 对比，
+#     判断 N2 R²=0.587 的瓶颈是 UW 下调 CH4/N2 还是 bounded_simplex 本身
+# 基线对照:
+#   - uw_clamped_slow_branch_cnn1d_tcn_fusion.yaml (bounded + UW, N2 R²=0.587)
+#   - slow_branch_cnn1d_tcn_fusion.yaml (原始等权 MSE, N2 R²=0.632)
+
+run:
+  name: v3_bounded_simplex_equal_mse_slow_branch_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_bounded_simplex_equal_mse_slow_branch_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_tcn_fusion_slow_branch
+  slow_dim: 8
+  waveform_embedding_dim: 64
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  tcn_channels: [64, 64, 64]
+  tcn_kernel_size: 3
+  tcn_dropout: 0.25
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+  derive_last: true              # 3+1: H2/CH4/CO2 自由预测，N2 = 100 - sum(三者)
+  derive_last_mode: bounded_simplex
+  output_prior: [9.288469, 75.755157, 4.994778, 9.961745]
+  slow_encoder:
+    enabled: true
+    hidden_dim: 32
+    embedding_dim: 64
+
+training:
+  epochs: 150
+  batch_size: 128
+  device: auto
+  amp: true
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: false
+  uncertainty_weighted: null      # 关键差异: 关闭 UW，使用等权 MSE
+  sum_constraint: null            # bounded_simplex 已保证 sum=100，无需额外约束
+  early_stopping_patience: 30     # 等权 MSE 收敛更稳定，恢复到 30
+  num_workers: 12
+  eval_num_workers: 4
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 15
+    eta_min: 0.00001

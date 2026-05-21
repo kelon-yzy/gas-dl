@@ -11,12 +11,12 @@ import sys
 
 import pandas as pd
 
+from patent_model.sklearnex_patch import patch_sklearn_for_traditional_ml
+
 from patent_model.logging_utils import get_logger
-from patent_model.modeling import MultiComponentPatentModel
 from scripts._cli_utils import positive_int
 from scripts.environment_compensation_common import add_model_args, profile_data_dir, resolve_feature_profile_name
-from scripts.train_patent_model import build_model_config, build_parser as build_train_parser
-from scripts.train_patent_model import prepare_training_data, run_training
+from scripts.train_patent_model import build_parser as build_train_parser
 
 PIPELINE_PARENT = Path(__file__).resolve().parents[2]
 if str(PIPELINE_PARENT) not in sys.path:
@@ -25,6 +25,15 @@ if str(PIPELINE_PARENT) not in sys.path:
 from pipeline.cli_progress import build_cli_progress
 
 logger = get_logger(__name__)
+
+
+def _load_training_runtime():
+  if "patent_model.modeling" not in sys.modules:
+    patch_sklearn_for_traditional_ml()
+  from patent_model.modeling import MultiComponentPatentModel
+  from scripts.train_patent_model import build_model_config, prepare_training_data, run_training
+
+  return MultiComponentPatentModel, build_model_config, prepare_training_data, run_training
 
 
 DEFAULT_PROFILES = ("v3_raw_no_env", "v3_raw_tph")
@@ -262,6 +271,7 @@ def _legacy_row_from_summary(profile: str, combo: str, summary: dict[str, object
 
 
 def _run_plan_item(args: argparse.Namespace, output_root: Path, plan_item: ExecutionPlanItem, progress=None, completed_before: int = 0, total_runs: int = 0) -> ExecutionTaskResult:
+  MultiComponentPatentModel, build_model_config, prepare_training_data, run_training = _load_training_runtime()
   profile = plan_item.profile
   logger.info(
     "grid item profile=%s branch=%s meta_count=%d",
