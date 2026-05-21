@@ -20,8 +20,8 @@ from scripts.run_four_component_model_grid import main as run_four_component_mod
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run G1 traditional-model grid for V3.1 dual-channel data.")
-    parser.add_argument("--data-dir", default=str(ROOT / "outputs" / "exp01_traditional"))
-    parser.add_argument("--output-root", default=str(ROOT / "outputs" / "exp01_traditional"))
+    parser.add_argument("--data-dir", default=str(ROOT / "outputs" / "exp01_traditional" / "data"))
+    parser.add_argument("--output-root", default=str(ROOT / "outputs" / "exp01_traditional" / "runs"))
     parser.add_argument("--tag", default="formal")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-limit", type=int, default=None)

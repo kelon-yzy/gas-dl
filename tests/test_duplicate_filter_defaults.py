@@ -13,7 +13,7 @@ class DuplicateFilterDefaultTests(unittest.TestCase):
     def test_default_duplicate_filter_reduces_train_samples(self) -> None:
         parser = build_parser()
         args = parser.parse_args([])
-        args.data_dir = str(ROOT / "outputs" / "exp01_traditional")
+        args.data_dir = str(ROOT / "outputs" / "exp01_traditional" / "data")
         args.feature_profile = "v3_waveform_dual_channel_four"
         args.component_mode = "four"
         data = prepare_training_data(args)

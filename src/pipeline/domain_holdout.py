@@ -124,7 +124,7 @@ def _summary_rows(domain_id: str, combo: str, summary: dict[str, object], train_
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Track A domain holdout for representative traditional models.")
-    parser.add_argument("--data-dir", default=str(ROOT / "outputs" / "exp01_traditional"))
+    parser.add_argument("--data-dir", default=str(ROOT / "outputs" / "exp01_traditional" / "data"))
     parser.add_argument("--output-root", default=str(ROOT / "outputs" / "exp04_domain"))
     parser.add_argument("--profile", default="v3_raw_no_env")
     parser.add_argument("--combo-list", nargs="*", default=list(DEFAULT_REPRESENTATIVE_COMBOS))

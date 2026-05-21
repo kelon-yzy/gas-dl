@@ -213,7 +213,7 @@ powershell -File experiments\exp03_fusion_grid.ps1
 powershell -File experiments\exp06_reproducibility.ps1
 
 # 传统 ML 单独调度示例：paper_core（默认交互终端自动显示 CLI 进度）
-python src\pipeline\train_traditional.py --data-dir outputs\exp01_traditional --output-root outputs\exp01_traditional --tag formal_seed42_core --seed 42 --profiles v3_raw_no_env v3_raw_tph --combo-list svr_ridge pls_ridge xgboost_ridge --max-workers 1 --n-jobs -1 --n-perturbations 10 --stacking-folds 3 --xgb-n-jobs 4
+python src\pipeline\train_traditional.py --data-dir outputs\exp01_traditional\data --output-root outputs\exp01_traditional\runs --tag formal_seed42_core --seed 42 --profiles v3_raw_no_env v3_raw_tph --combo-list svr_ridge pls_ridge xgboost_ridge --max-workers 1 --n-jobs -1 --n-perturbations 10 --stacking-folds 3 --xgb-n-jobs 4
 
 # 传统 ML 新数据集调度示例：使用 waveform_v3_seedpath_formal 的 4 路 split（与 DL 同测试集）
 python src\pipeline\train_traditional.py --data-dir outputs\exp01_traditional_seedpath --output-root outputs\exp01_traditional_seedpath --tag formal_seedpath --seed 42 --split-dir data\waveform_v3_seedpath_formal\splits --profiles v3_raw_no_env v3_raw_tph --combo-list svr_ridge pls_ridge xgboost_ridge --max-workers 4
@@ -231,7 +231,7 @@ python src\pipeline\plot_deep_training_curves.py
 python src\pipeline\plot_deep_training_curves.py --root outputs\exp02_deep_e2e\v3_tcn_multimodal_seed42 --output-dir outputs\deep_training_curves\v3_tcn_multimodal_seed42
 
 # 环境敏感度曲线分析：用已训练模型出 T/P/RH vs RMSE 趋势图
-python src\pipeline\sensitivity_scan.py --predictions outputs\exp01_traditional\four_component_formal_seed42_core_grid_v3_raw_tph\xgboost_ridge\predictions.csv --condition-grid outputs\exp01_traditional\condition_grid_v1.csv --output-dir outputs\exp04_adaptation\G3a_sensitivity
+python src\pipeline\sensitivity_scan.py --predictions outputs\exp01_traditional\runs\archive\four_component_formal_seed42_core_grid_v3_raw_tph\xgboost_ridge\predictions.csv --condition-grid outputs\exp01_traditional\data\condition_grid_v1.csv --output-dir outputs\exp04_adaptation\G3a_sensitivity
 
 # 深度重复性检测单独调度示例：覆盖 seed 与输出根目录
 python src\pipeline\train_deep.py --config configs\deep\slow_only_tcn_formal.yaml --epochs 1 --seed 52 --output-root outputs\exp06_reproducibility\deep --no-ui

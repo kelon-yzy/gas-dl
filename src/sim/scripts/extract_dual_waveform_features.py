@@ -420,7 +420,7 @@ def generate_traditional_from_waveform_v3(source_dir: str | Path, output_dir: st
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate traditional tables from V3.1 dual-channel waveform package.")
     parser.add_argument("--source-dir", default="data/waveform_v3")
-    parser.add_argument("--output-dir", default="outputs/exp01_traditional")
+    parser.add_argument("--output-dir", default="outputs/exp01_traditional/data")
     parser.add_argument("--sequence-limit", type=int, default=None)
     parser.add_argument("--timesteps", default=None)
     return parser

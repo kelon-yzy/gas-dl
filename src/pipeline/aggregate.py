@@ -17,7 +17,8 @@ def _collect_grid_summaries(root: Path = ROOT) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     patterns = [
         ("outputs/exp04_domain/domain_holdout_summary.csv", "exp04_domain"),
-        ("outputs/exp01_traditional/four_component_*_grid_summary.csv", "exp01_traditional"),
+        ("outputs/exp01_traditional/runs/four_component_*_grid_summary.csv", "exp01_traditional"),
+        ("outputs/exp01_traditional/runs/archive/four_component_*_grid_summary.csv", "exp01_traditional"),
         ("outputs/exp01_traditional_smoke/four_component_*_grid_summary.csv", "exp01_traditional_smoke"),
         ("outputs/exp03_fusion/four_component_*_grid_summary.csv", "exp03_fusion"),
         ("outputs/exp05_robust/**/robustness_summary.csv", "exp05_robust"),
@@ -43,7 +44,7 @@ def _collect_grid_summaries(root: Path = ROOT) -> pd.DataFrame:
             frames.append(frame)
     repro_files = list(root.glob("outputs/exp06_reproducibility/traditional/four_component_*_grid_summary.csv"))
     if repro_files:
-        seed42_main = root / "outputs" / "exp01_traditional" / "four_component_formal_seed42_core_grid_summary.csv"
+        seed42_main = root / "outputs" / "exp01_traditional" / "runs" / "archive" / "four_component_formal_seed42_core_grid_summary.csv"
         if seed42_main.exists():
             repro_files.insert(0, seed42_main)
         for path in repro_files:

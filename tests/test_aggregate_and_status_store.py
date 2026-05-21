@@ -18,7 +18,7 @@ class AggregateAndStatusStoreTests(unittest.TestCase):
     def test_collect_grid_summaries_does_not_duplicate_main_exp01_as_exp06_without_repro_outputs(self) -> None:
         tmp = pathlib.Path(tempfile.mkdtemp())
         try:
-            summary_path = tmp / "outputs" / "exp01_traditional" / "four_component_formal_seed42_core_grid_summary.csv"
+            summary_path = tmp / "outputs" / "exp01_traditional" / "runs" / "archive" / "four_component_formal_seed42_core_grid_summary.csv"
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(
                 [
@@ -36,7 +36,7 @@ class AggregateAndStatusStoreTests(unittest.TestCase):
             self.assertEqual(frame["exp_id"].tolist(), ["exp01_traditional"])
             self.assertEqual(
                 [value.replace("\\", "/") for value in frame["source_file"].tolist()],
-                ["outputs/exp01_traditional/four_component_formal_seed42_core_grid_summary.csv"],
+                ["outputs/exp01_traditional/runs/archive/four_component_formal_seed42_core_grid_summary.csv"],
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -70,7 +70,7 @@ class AggregateAndStatusStoreTests(unittest.TestCase):
         tmp = pathlib.Path(tempfile.mkdtemp())
         try:
             status_path = tmp / "STATUS.tsv"
-            summary_path = tmp / "outputs" / "exp01_traditional" / "four_component_formal_seed42_core_grid_summary.csv"
+            summary_path = tmp / "outputs" / "exp01_traditional" / "runs" / "archive" / "four_component_formal_seed42_core_grid_summary.csv"
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(
                 [
@@ -111,7 +111,7 @@ class AggregateAndStatusStoreTests(unittest.TestCase):
     def test_collect_grid_summaries_uses_model_name_in_result_group(self) -> None:
         tmp = pathlib.Path(tempfile.mkdtemp())
         try:
-            summary_path = tmp / "outputs" / "exp01_traditional" / "four_component_formal_seed42_core_grid_summary.csv"
+            summary_path = tmp / "outputs" / "exp01_traditional" / "runs" / "archive" / "four_component_formal_seed42_core_grid_summary.csv"
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(
                 [

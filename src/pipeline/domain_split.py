@@ -189,7 +189,7 @@ def build_domain_artifacts(data_dir: str | Path, output_dir: str | Path, min_dom
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build T-P-RH holdout domain definitions for Track A.")
-    parser.add_argument("--data-dir", default=str(ROOT / "outputs" / "exp01_traditional"))
+    parser.add_argument("--data-dir", default=str(ROOT / "outputs" / "exp01_traditional" / "data"))
     parser.add_argument("--output-dir", default=str(ROOT / "outputs" / "exp04_domain"))
     parser.add_argument("--min-domain-samples", type=int, default=500)
     args = parser.parse_args()
