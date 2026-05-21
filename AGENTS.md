@@ -153,6 +153,29 @@ model:
 | early_stopping_patience | 25-30 | 等权用 30，UW 用 25 |
 | grad_clip_norm | 1.0 | 梯度裁剪 |
 
+## 已知问题
+
+### torch.compile 与 bounded_simplex 不兼容
+
+**状态**：未解决，所有 bounded_simplex 配置必须设 `compile: false`。
+
+**现象**：启用 `torch.compile(mode="default")` 后，bounded_simplex 参数化（softmax + sigmoid）
+的模型梯度完全失效——train_loss 在整个训练过程中不下降（锁死在初始值），所有 R²=0。
+
+**根因**：Inductor 后端在编译 bounded_simplex 的 `F.softmax` + `torch.sigmoid` + 乘法链时
+梯度传播断裂。可能与 `@torch.compiler.disable` 图断点 + AMP autocast 的交互有关。
+
+**临时方案**：所有使用 `derive_last_mode: bounded_simplex` 的配置中加 `compile: false`。
+对训练速度影响约 10-15%（单 epoch 慢 1-2 秒），但保证梯度正确。
+
+### UW + warmup 的 sigma 膨胀
+
+**状态**：已修复（orchestrator.py 中自动冻结 sigma 参数至 warmup 结束）。
+
+**机制**：warmup 期间模型 lr 极低（~1e-5），sigma 参数以更高 lr 膨胀，
+`exp(-2·log_σ)` 衰减压制模型梯度信号，导致模型卡在初始化状态。
+修复后 warmup 期间 sigma 冻结，等模型建立基础表征后再解冻。
+
 ## 文献参考
 
 - **Uncertainty Weighting**: Kendall, A., Gal, Y., & Cipolla, R. (2018). Multi-Task Learning Using Uncertainty to Weigh Losses for Scene Geometry and Semantics. CVPR.
