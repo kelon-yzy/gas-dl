@@ -3,6 +3,7 @@ from __future__ import annotations
 from torch import nn
 
 from models.cnn1d import CNN1DRegressor
+from models.cnn1d_lstm_fusion_slow_branch import CNN1DLSTMSlowBranchRegressor
 from models.cnn1d_tcn_fusion import CNN1DTCNFusionRegressor
 from models.cnn1d_tcn_fusion_slow_branch import CNN1DTCNSlowBranchRegressor
 from models.cnn_lstm import CNNLSTMRegressor
@@ -36,6 +37,8 @@ MODEL_REGISTRY = {
     "cnn1d_tcn_fusion": CNN1DTCNFusionRegressor,
     # 慢变量分支隔离实验：慢变量 MLP 编码 + target-specific heads
     "cnn1d_tcn_fusion_slow_branch": CNN1DTCNSlowBranchRegressor,
+    # 慢变量分支隔离实验：保持 slow-branch 结构，仅将 TCN 替换为 LSTM
+    "cnn1d_lstm_fusion_slow_branch": CNN1DLSTMSlowBranchRegressor,
     # FiLM 调制型早期融合（E2，docs/早期融合_Early_Fusion_完整实验方案.md §7）
     "early_fusion_film": EarlyFusionFiLMRegressor,
     # 多模态变体（MultimodalWrapper + 各纯慢变量 backbone）

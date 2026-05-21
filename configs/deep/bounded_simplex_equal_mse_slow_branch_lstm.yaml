@@ -1,0 +1,64 @@
+# 消融实验: bounded_simplex + 等权 MSE + slow_branch LSTM
+# 目的: 在保持 slow_branch / bounded_simplex / 等权 MSE 不变的前提下，
+#   仅将时序融合器从 TCN 替换为 LSTM，和 TCN 对照实验做结构等价比较。
+# 基线对照:
+#   - bounded_simplex_equal_mse_slow_branch.yaml (TCN slow_branch)
+
+run:
+  name: v3_bounded_simplex_equal_mse_slow_branch_lstm_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_bounded_simplex_equal_mse_slow_branch_lstm_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_lstm_fusion_slow_branch
+  slow_dim: 8
+  waveform_embedding_dim: 64
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  lstm_hidden_size: 64
+  lstm_num_layers: 1
+  lstm_bidirectional: false
+  lstm_dropout: 0.0
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+  derive_last: true
+  derive_last_mode: bounded_simplex
+  output_prior: [9.288469, 75.755157, 4.994778, 9.961745]
+  slow_encoder:
+    enabled: true
+    hidden_dim: 32
+    embedding_dim: 64
+
+training:
+  epochs: 150
+  batch_size: 128
+  device: auto
+  amp: true
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: false
+  uncertainty_weighted: null
+  sum_constraint: null
+  early_stopping_patience: 30
+  num_workers: 12
+  eval_num_workers: 4
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 15
+    eta_min: 0.00001
