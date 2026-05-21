@@ -282,6 +282,22 @@ class CNN1DTCNSlowBranchRegressor(nn.Module):
             return slow
         return self.slow_encoder(slow)
 
+    @torch.compiler.disable
+    def _validate_forward_inputs(
+        self,
+        ultrasonic: torch.Tensor | None,
+        ultrasonic_scale: torch.Tensor | None,
+        fiber_mic: torch.Tensor | None,
+        fiber_mic_scale: torch.Tensor | None,
+    ) -> None:
+        """前向输入校验（不参与 compile trace）。"""
+        if self.ultrasonic_encoder is not None:
+            if ultrasonic is None or ultrasonic_scale is None:
+                raise ValueError("use_ultrasonic=True 但未传入 ultrasonic / ultrasonic_scale")
+        if self.fiber_mic_encoder is not None:
+            if fiber_mic is None or fiber_mic_scale is None:
+                raise ValueError("use_fiber_mic=True 但未传入 fiber_mic / fiber_mic_scale")
+
     def forward(
         self,
         ultrasonic: torch.Tensor | None,
@@ -290,24 +306,23 @@ class CNN1DTCNSlowBranchRegressor(nn.Module):
         fiber_mic_scale: torch.Tensor | None,
         slow: torch.Tensor,
     ) -> torch.Tensor:
+        self._validate_forward_inputs(ultrasonic, ultrasonic_scale, fiber_mic, fiber_mic_scale)
         batch, timesteps, _ = slow.shape
         slow_features = self._encode_slow(slow)
 
-        embeds: list[torch.Tensor] = []
-        if self.ultrasonic_encoder is not None:
-            if ultrasonic is None or ultrasonic_scale is None:
-                raise ValueError("use_ultrasonic=True 但未传入 ultrasonic / ultrasonic_scale")
-            embeds.append(
-                self._encode_waveform_branch(self.ultrasonic_encoder, ultrasonic, ultrasonic_scale, batch, timesteps)
-            )
-        if self.fiber_mic_encoder is not None:
-            if fiber_mic is None or fiber_mic_scale is None:
-                raise ValueError("use_fiber_mic=True 但未传入 fiber_mic / fiber_mic_scale")
-            embeds.append(
-                self._encode_waveform_branch(self.fiber_mic_encoder, fiber_mic, fiber_mic_scale, batch, timesteps)
-            )
-
-        fused = torch.cat([*embeds, slow_features], dim=-1)
+        # 用固定结构替代动态 list.append，避免 torch.compile graph break
+        if self.ultrasonic_encoder is not None and self.fiber_mic_encoder is not None:
+            ultra_emb = self._encode_waveform_branch(self.ultrasonic_encoder, ultrasonic, ultrasonic_scale, batch, timesteps)
+            fiber_emb = self._encode_waveform_branch(self.fiber_mic_encoder, fiber_mic, fiber_mic_scale, batch, timesteps)
+            fused = torch.cat([ultra_emb, fiber_emb, slow_features], dim=-1)
+        elif self.ultrasonic_encoder is not None:
+            ultra_emb = self._encode_waveform_branch(self.ultrasonic_encoder, ultrasonic, ultrasonic_scale, batch, timesteps)
+            fused = torch.cat([ultra_emb, slow_features], dim=-1)
+        elif self.fiber_mic_encoder is not None:
+            fiber_emb = self._encode_waveform_branch(self.fiber_mic_encoder, fiber_mic, fiber_mic_scale, batch, timesteps)
+            fused = torch.cat([fiber_emb, slow_features], dim=-1)
+        else:
+            fused = slow_features
         fused_nct = fused.transpose(1, 2)
         feats = self.tcn(fused_nct)
 
