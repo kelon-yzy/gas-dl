@@ -1,0 +1,76 @@
+# 消融实验: bounded_simplex + 3-task UW (只对 H2/CH4/CO2 做不确定性加权)
+# 核心思路:
+#   - loss_columns=3: 只对前 3 列计算 loss，N2 无梯度（消除耦合）
+#   - UW num_tasks=3: 在 H2/CH4/CO2 之间自适应加权
+#   - 此时 UW 只需平衡 3 个无强耦合的任务，不会像旧 4-task UW 那样崩塌
+# 预期:
+#   - CO2 最容易（std 小、R² 高），UW 会适当降低其权重
+#   - CH4 最难（std 大），UW 会给它更多注意力
+#   - 整体效果应优于等权 3-task loss（因 H2/CO2 不会挤占 CH4 的学习资源）
+# 对照:
+#   - bounded_simplex_3task_loss_slow_branch.yaml (3-task 等权 MSE)
+#   - bounded_simplex_equal_mse_slow_branch.yaml (4-task 等权 MSE)
+#   - uw_clamped_slow_branch_cnn1d_tcn_fusion.yaml (4-task UW, N2 R²=0.587)
+
+run:
+  name: v3_bounded_simplex_3task_uw_slow_branch_seed42
+  seed: 42
+  output_dir: outputs/exp02_deep_e2e/v3_bounded_simplex_3task_uw_slow_branch_seed42
+
+data:
+  dataset_type: waveform_v3
+  npz_path: ../../data/waveform_v3
+  index_path: ../../data/waveform_v3/sequence_index.csv
+  split_dir: ../../data/waveform_v3/splits
+  scaler_path: ../../data/waveform_v3/scalers/scaler_slow_sequence.json
+  split_strategy: existing_or_group_mixture
+  time_window: all
+
+model:
+  name: cnn1d_tcn_fusion_slow_branch
+  slow_dim: 8
+  waveform_embedding_dim: 64
+  acoustic_channels: [16, 32, 64, 64]
+  acoustic_kernel_size: 7
+  acoustic_dropout: 0.15
+  tcn_channels: [64, 64, 64]
+  tcn_kernel_size: 3
+  tcn_dropout: 0.25
+  head_dropout: 0.25
+  out_dim: 4
+  use_ultrasonic: true
+  use_fiber_mic: true
+  derive_last: true
+  derive_last_mode: bounded_simplex
+  output_prior: [9.288469, 75.755157, 4.994778, 9.961745]
+  slow_encoder:
+    enabled: true
+    hidden_dim: 32
+    embedding_dim: 64
+
+training:
+  epochs: 150
+  batch_size: 128
+  device: auto
+  amp: true
+  optimizer: adamw
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: mse
+  label_balanced_loss: false
+  uncertainty_weighted:
+    num_tasks: 3                  # 只对 3 个自由头做 UW
+    init_log_sigma: 0.0
+    lr_multiplier: 2.0
+    sigma_clamp: [-1.0, 1.5]     # 保留 clamp 防止极化
+  loss_columns: 3                 # 只对前 3 列 (H2/CH4/CO2) 计算 loss
+  sum_constraint: null
+  early_stopping_patience: 25
+  num_workers: 12
+  eval_num_workers: 4
+  grad_clip_norm: 1.0
+  cudnn_benchmark: true
+  lr_scheduler:
+    type: cosine_warmup
+    warmup_epochs: 15
+    eta_min: 0.00001
