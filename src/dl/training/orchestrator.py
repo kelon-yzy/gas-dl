@@ -231,12 +231,15 @@ def _prepare_loader_resources(config: dict, dependencies: TrainDependencies, out
 
 def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bool, label_weights: torch.Tensor | None = None) -> tuple:
     model = build_model(config["model"]).to(device)
-    # torch.compile：Linux 上默认开启（triton 可用），Windows 上默认关闭；可通过配置覆盖
+    # torch.compile：Linux + CUDA 上默认开启；可通过配置 compile: false 关闭
+    # PyTorch 2.8+：默认使用 "default" 模式（Inductor 优化但不启用 CUDA Graphs），
+    # 避免 "reduce-overhead" 的高显存占用（CUDA Graphs private pool 可达 13GB+），
+    # 多实验并行时尤其重要。如需单进程极致速度，可在 yaml 中设 compile_mode: reduce-overhead。
     import sys
     compile_default = sys.platform.startswith("linux") and device.type == "cuda"
     compile_cfg = config["training"].get("compile", compile_default)
     if compile_cfg and hasattr(torch, "compile"):
-        compile_mode = config["training"].get("compile_mode", "reduce-overhead")
+        compile_mode = config["training"].get("compile_mode", "default")
         try:
             model = torch.compile(model, mode=compile_mode)
         except Exception as exc:  # noqa: BLE001 - compile 失败不应阻断训练
@@ -253,7 +256,7 @@ def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bo
     loss_fn = loss_fn.to(device)
     optimizer = _build_optimizer_with_loss(model, loss_fn, config["training"])
     stopper = EarlyStopping(patience=int(config["training"].get("early_stopping_patience", 25)), mode="min")
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
     total_epochs = int(config["training"].get("epochs", 200))
     scheduler = _prepare_scheduler(optimizer, total_epochs, config["training"])
     grad_clip_norm = float(config["training"].get("grad_clip_norm", 0.0))

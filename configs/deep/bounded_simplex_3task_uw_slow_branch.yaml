@@ -53,7 +53,6 @@ training:
   batch_size: 128
   device: auto
   amp: true
-  compile: false                 # 关闭 torch.compile 以节省显存，支持多实验并行
   optimizer: adamw
   learning_rate: 0.00015
   weight_decay: 0.01

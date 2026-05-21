@@ -42,7 +42,13 @@ def select_device(name: str) -> torch.device:
 
 
 def configure_cudnn(training_config: dict, device: torch.device) -> None:
-    """按配置开启 cuDNN benchmark 和 TF32 Tensor Core 加速。"""
+    """按配置开启 cuDNN benchmark、TF32 Tensor Core 和 cuDNN 算法选择加速。
+
+    适配 PyTorch 2.8+ / CUDA 12.8：
+    - cudnn.benchmark: 自动选择最快卷积算法（输入尺寸固定时效果好）
+    - float32_matmul_precision: Ampere+ GPU 上 TF32 Tensor Core 加速
+    - cudnn.allow_tf32: 允许 cuDNN 卷积使用 TF32（与 matmul_precision 互补）
+    """
     if device.type != "cuda":
         return
     if bool(training_config.get("cudnn_benchmark", False)):
@@ -50,6 +56,8 @@ def configure_cudnn(training_config: dict, device: torch.device) -> None:
     # Ampere+ GPU 上允许 float32 矩阵乘法使用 TF32 Tensor Core（精度 ~1e-5 级，可显著加速）
     matmul_precision = str(training_config.get("float32_matmul_precision", "high"))
     torch.set_float32_matmul_precision(matmul_precision)
+    # cuDNN 卷积也允许 TF32（PyTorch 2.x 默认 True，此处显式确认）
+    torch.backends.cudnn.allow_tf32 = True
 
 
 def make_loader(
@@ -238,7 +246,7 @@ def _train_one_epoch(request: TrainEpochRequest) -> float:
     total_samples = 0
     scaler = request.scaler
     if scaler is None:
-        scaler = torch.amp.GradScaler("cuda", enabled=False)
+        scaler = torch.amp.GradScaler(request.device.type, enabled=False)
     for batch in request.loader:
         request.optimizer.zero_grad(set_to_none=True)
         if not _is_waveform_batch(batch) and request.env_aug_sigma > 0.0:
