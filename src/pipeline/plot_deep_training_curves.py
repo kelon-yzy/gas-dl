@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = ROOT / "src"
@@ -18,80 +14,17 @@ if str(SRC_ROOT) not in sys.path:
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
 
-REQUIRED_LOG_COLUMNS = ("epoch", "train_loss", "val_loss", "val_macro_RMSE", "val_macro_MAE")
-OPTIONAL_LOG_COLUMNS = ("lr",)
+from pipeline.run_plot_data import RunAnalysisBundle, TrainingRunLog, load_training_run_log, resolve_cli_path
+
 SUPPORTED_FORMATS = ("png", "svg", "pdf")
 
 
-@dataclass(frozen=True)
-class TrainingRunLog:
-    run_dir: Path
-    relative_name: str
-    display_name: str
-    frame: pd.DataFrame
-    summary: dict[str, Any] | None
-    config: dict[str, Any] | None
-    best_epoch: int
-    best_val_macro_rmse: float
-
-
 def _resolve_cli_path(value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return (ROOT / path).resolve()
-
-
-def _safe_slug(value: str) -> str:
-    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", value.strip())
-    return cleaned.strip("_") or "run"
-
-
-def _run_artifact_name(root: Path, run_dir: Path) -> str:
-    relative = run_dir.relative_to(root)
-    parts = [_safe_slug(part) for part in relative.parts if part not in ("", ".")]
-    if not parts:
-        return _safe_slug(run_dir.name)
-    return "__".join(parts)
-
-
-def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _build_warning(run_dir: Path, reason: str) -> str:
-    return f"跳过 {run_dir}: {reason}"
+    return resolve_cli_path(value, ROOT)
 
 
 def _load_training_run(root: Path, run_dir: Path) -> tuple[TrainingRunLog | None, str | None]:
-    log_path = run_dir / "train_log.csv"
-    try:
-        frame = pd.read_csv(log_path)
-    except pd.errors.EmptyDataError:
-        return None, _build_warning(run_dir, "train_log.csv 为空")
-    if frame.empty:
-        return None, _build_warning(run_dir, "train_log.csv 没有有效行")
-
-    missing = [column for column in REQUIRED_LOG_COLUMNS if column not in frame.columns]
-    if missing:
-        return None, _build_warning(run_dir, f"缺少必要列: {', '.join(missing)}")
-
-    ordered = frame.sort_values("epoch").reset_index(drop=True)
-    best_idx = ordered["val_macro_RMSE"].idxmin()
-    best_epoch = int(ordered.loc[best_idx, "epoch"])
-    best_val_macro_rmse = float(ordered.loc[best_idx, "val_macro_RMSE"])
-    return TrainingRunLog(
-        run_dir=run_dir,
-        relative_name=_run_artifact_name(root, run_dir),
-        display_name=run_dir.name,
-        frame=ordered,
-        summary=_load_json_if_exists(run_dir / "summary.json"),
-        config=_load_json_if_exists(run_dir / "config.json"),
-        best_epoch=best_epoch,
-        best_val_macro_rmse=best_val_macro_rmse,
-    ), None
+    return load_training_run_log(root, run_dir)
 
 
 def find_training_run_dirs(root: Path) -> list[Path]:
@@ -123,21 +56,77 @@ def _save_figure(fig, base_path: Path, formats: tuple[str, ...], dpi: int) -> li
     return saved_paths
 
 
-def _build_run_title(run: TrainingRunLog) -> str:
-    run_name = run.display_name
-    if run.summary and run.summary.get("run_name"):
+def _build_run_title(run: TrainingRunLog | RunAnalysisBundle) -> str:
+    run_name = getattr(run, "run_name", None) or run.display_name
+    if getattr(run, "summary", None) and run.summary.get("run_name"):
         run_name = str(run.summary["run_name"])
-    model_name = None
-    if run.summary and run.summary.get("model"):
-        model_name = str(run.summary["model"])
-    elif run.config and run.config.get("model", {}).get("name"):
-        model_name = str(run.config["model"]["name"])
+    model_name = getattr(run, "model_name", None)
+    if model_name is None:
+        if getattr(run, "summary", None) and run.summary.get("model"):
+            model_name = str(run.summary["model"])
+        elif getattr(run, "config", None) and run.config.get("model", {}).get("name"):
+            model_name = str(run.config["model"]["name"])
     if model_name:
         return f"{run_name} | {model_name}"
     return run_name
 
 
-def plot_training_run(run: TrainingRunLog, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
+def _plot_sum_diagnostics(axis, run: TrainingRunLog | RunAnalysisBundle, epochs) -> bool:
+    required = ("val_mean_abs_sum_error", "val_mean_pred_sum")
+    if any(column not in run.frame.columns for column in required):
+        return False
+
+    best_row = run.frame.loc[run.frame["epoch"] == run.best_epoch].iloc[0]
+    sum_axis = axis.twinx()
+    left_line = axis.plot(
+        epochs,
+        run.frame["val_mean_abs_sum_error"],
+        color="#1f77b4",
+        linewidth=2.0,
+        label="mean_abs_sum_error",
+    )[0]
+    right_line = sum_axis.plot(
+        epochs,
+        run.frame["val_mean_pred_sum"],
+        color="#ff7f0e",
+        linewidth=2.0,
+        label="mean_pred_sum",
+    )[0]
+    target_line = sum_axis.axhline(100.0, color="#666666", linestyle="--", linewidth=1.0, label="target_sum=100")
+    axis.scatter([run.best_epoch], [float(best_row["val_mean_abs_sum_error"])], color="#111111", zorder=3, s=24)
+    sum_axis.scatter([run.best_epoch], [float(best_row["val_mean_pred_sum"])], color="#111111", zorder=3, s=24)
+    axis.set_title("Validation sum diagnostics")
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("mean_abs_sum_error")
+    sum_axis.set_ylabel("mean_pred_sum")
+    axis.grid(alpha=0.25)
+
+    annotation_lines = [
+        f"best={run.best_epoch}",
+        f"abs_sum_error={float(best_row['val_mean_abs_sum_error']):.4f}",
+        f"pred_sum={float(best_row['val_mean_pred_sum']):.4f}",
+    ]
+    if "val_std_pred_sum" in run.frame.columns:
+        annotation_lines.append(f"std_pred_sum={float(best_row['val_std_pred_sum']):.4f}")
+    axis.text(
+        0.04,
+        0.96,
+        "\n".join(annotation_lines),
+        transform=axis.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.25", "fc": "white", "ec": "#cccccc", "alpha": 0.9},
+    )
+    axis.legend(
+        [left_line, right_line, target_line],
+        ["mean_abs_sum_error", "mean_pred_sum", "target_sum=100"],
+        loc="upper right",
+    )
+    return True
+
+
+def plot_training_run(run: TrainingRunLog | RunAnalysisBundle, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
     plt = _import_plotting_modules()
     fig, axes = plt.subplots(2, 2, figsize=(13, 8))
     epochs = run.frame["epoch"]
@@ -172,7 +161,9 @@ def plot_training_run(run: TrainingRunLog, output_dir: Path, formats: tuple[str,
     axes[1, 0].set_ylabel("macro_MAE")
     axes[1, 0].grid(alpha=0.25)
 
-    if "lr" in run.frame.columns:
+    if _plot_sum_diagnostics(axes[1, 1], run, epochs):
+        pass
+    elif "lr" in run.frame.columns:
         axes[1, 1].plot(epochs, run.frame["lr"], color="#9467bd", linewidth=2.0)
         axes[1, 1].set_title("Learning Rate")
         axes[1, 1].set_xlabel("Epoch")
@@ -182,7 +173,16 @@ def plot_training_run(run: TrainingRunLog, output_dir: Path, formats: tuple[str,
         axes[1, 1].set_visible(False)
 
     fig.suptitle(_build_run_title(run), fontsize=14)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.text(
+        0.5,
+        0.935,
+        f"best epoch={run.best_epoch} | best val macro_RMSE={run.best_val_macro_rmse:.4f}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color="#555555",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     saved_paths = _save_figure(fig, output_dir / f"{run.relative_name}_training_curves", formats, dpi)
     plt.close(fig)
     return saved_paths

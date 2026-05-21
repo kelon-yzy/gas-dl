@@ -24,20 +24,28 @@ class PlotDeepTrainingCurvesTests(unittest.TestCase):
         relative_dir: str,
         *,
         include_lr: bool = True,
+        include_sum_metrics: bool = False,
     ) -> pathlib.Path:
         run_dir = root / relative_dir
         run_dir.mkdir(parents=True, exist_ok=True)
-        frame = pd.DataFrame(
-            {
-                "epoch": [1, 2, 3],
-                "train_loss": [1.4, 1.0, 0.8],
-                "val_loss": [1.2, 0.9, 0.7],
-                "val_macro_RMSE": [1.1, 0.8, 0.9],
-                "val_macro_MAE": [0.9, 0.7, 0.8],
-                "improved": [True, True, False],
-                "lr": [3e-4, 2e-4, 1e-4],
-            }
-        )
+        frame_data = {
+            "epoch": [1, 2, 3],
+            "train_loss": [1.4, 1.0, 0.8],
+            "val_loss": [1.2, 0.9, 0.7],
+            "val_macro_RMSE": [1.1, 0.8, 0.9],
+            "val_macro_MAE": [0.9, 0.7, 0.8],
+            "improved": [True, True, False],
+            "lr": [3e-4, 2e-4, 1e-4],
+        }
+        if include_sum_metrics:
+            frame_data.update(
+                {
+                    "val_mean_pred_sum": [99.8, 100.0, 100.1],
+                    "val_mean_abs_sum_error": [0.30, 0.10, 0.15],
+                    "val_std_pred_sum": [0.20, 0.05, 0.08],
+                }
+            )
+        frame = pd.DataFrame(frame_data)
         if not include_lr:
             frame = frame.drop(columns=["lr"])
         frame.to_csv(run_dir / "train_log.csv", index=False)
@@ -97,6 +105,24 @@ class PlotDeepTrainingCurvesTests(unittest.TestCase):
         self.assertEqual(result["skipped_runs"], 0)
         self.assertEqual(result["warnings"], [])
         self.assertTrue((output_dir / "exp02__run_without_lr_training_curves.png").exists())
+
+    def test_generate_training_curve_artifacts_prefers_sum_diagnostics_panel(self) -> None:
+        root = self.tmp_path / "outputs"
+        self._write_run(root, "exp02/run_with_sum_metrics", include_sum_metrics=True)
+        output_dir = self.tmp_path / "figures"
+
+        result = plot_deep_training_curves.generate_training_curve_artifacts(
+            root=root,
+            output_dir=output_dir,
+            formats=("svg",),
+            dpi=120,
+        )
+
+        self.assertEqual(result["processed_runs"], 1)
+        svg_text = (output_dir / "exp02__run_with_sum_metrics_training_curves.svg").read_text(encoding="utf-8")
+        self.assertIn("Validation sum diagnostics", svg_text)
+        self.assertIn("mean_abs_sum_error", svg_text)
+        self.assertIn("mean_pred_sum", svg_text)
 
     def test_generate_training_curve_artifacts_skips_empty_or_invalid_logs(self) -> None:
         root = self.tmp_path / "outputs"

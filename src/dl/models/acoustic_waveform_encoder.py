@@ -19,13 +19,13 @@ class AcousticWaveformEncoder(nn.Module):
         self.embedding_dim = embedding_dim
 
         self.features = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=15, stride=2, padding=7),
+            nn.Conv1d(1, 16, kernel_size=15, stride=2, padding=7, bias=False),
             nn.BatchNorm1d(16),
             nn.ReLU(),
-            nn.Conv1d(16, 32, kernel_size=11, stride=2, padding=5),
+            nn.Conv1d(16, 32, kernel_size=11, stride=2, padding=5, bias=False),
             nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=7, stride=2, padding=3),
+            nn.Conv1d(32, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm1d(64),
             nn.ReLU(),
         )

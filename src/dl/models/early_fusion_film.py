@@ -68,10 +68,10 @@ class _ConvBlock1D(nn.Module):
         super().__init__()
         ng = max(1, min(groups, c_out))
         layers: list[nn.Module] = [
-            nn.Conv1d(c_in, c_out, kernel_size=kernel_size, stride=stride, padding=kernel_size // 2),
+            nn.Conv1d(c_in, c_out, kernel_size=kernel_size, stride=stride, padding=kernel_size // 2, bias=False),
             nn.GroupNorm(num_groups=ng, num_channels=c_out),
             nn.GELU(),
-            nn.Conv1d(c_out, c_out, kernel_size=3, stride=1, padding=1),
+            nn.Conv1d(c_out, c_out, kernel_size=3, stride=1, padding=1, bias=False),
             nn.GroupNorm(num_groups=ng, num_channels=c_out),
             nn.GELU(),
         ]

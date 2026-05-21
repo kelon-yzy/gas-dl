@@ -42,11 +42,14 @@ def select_device(name: str) -> torch.device:
 
 
 def configure_cudnn(training_config: dict, device: torch.device) -> None:
-    """按配置开启 cuDNN benchmark。模型输入形状固定时可加速 5-15%。"""
+    """按配置开启 cuDNN benchmark 和 TF32 Tensor Core 加速。"""
     if device.type != "cuda":
         return
     if bool(training_config.get("cudnn_benchmark", False)):
         torch.backends.cudnn.benchmark = True
+    # Ampere+ GPU 上允许 float32 矩阵乘法使用 TF32 Tensor Core（精度 ~1e-5 级，可显著加速）
+    matmul_precision = str(training_config.get("float32_matmul_precision", "high"))
+    torch.set_float32_matmul_precision(matmul_precision)
 
 
 def make_loader(
@@ -136,10 +139,12 @@ def _metadata_to_frame(meta) -> pd.DataFrame:
     return pd.DataFrame(normalized)
 
 
-def _mean_loss(total_loss: float, total_samples: int) -> float:
+def _mean_loss(total_loss: float | torch.Tensor, total_samples: int) -> float:
     if total_samples == 0:
         return float("nan")
-    return float(total_loss / total_samples)
+    raw = total_loss / total_samples
+    # 支持 GPU tensor 累积：仅在最终汇总时做一次 CPU 同步
+    return float(raw.item()) if isinstance(raw, torch.Tensor) else float(raw)
 
 
 def _optimizer_parameters(optimizer) -> list[torch.nn.Parameter]:
@@ -173,7 +178,7 @@ def apply_environment_augmentation(x: torch.Tensor, input_format: str, sigma: fl
 def predict(model, loader, device) -> PredictionBundle:
     model.eval()
     preds_gpu, targets_gpu, frames = [], [], []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in loader:
             pred, y, meta = _forward_batch(model, batch, device)
             preds_gpu.append(pred)
@@ -193,11 +198,11 @@ def evaluate_with_predictions(model, loader, loss_fn, device) -> tuple[float, Pr
     total_loss = 0.0
     total_samples = 0
     preds_gpu, targets_gpu, frames = [], [], []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in loader:
             pred, y, meta = _forward_batch(model, batch, device)
-            batch_size = int(y.shape[0])
-            total_loss += float(loss_fn(pred, y).item()) * batch_size
+            batch_size = y.shape[0]
+            total_loss = total_loss + loss_fn(pred, y).detach() * batch_size
             total_samples += batch_size
             preds_gpu.append(pred)
             targets_gpu.append(y)
@@ -218,11 +223,11 @@ def evaluate_loss(model, loader, loss_fn, device) -> float:
     model.eval()
     total_loss = 0.0
     total_samples = 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in loader:
             pred, y, _ = _forward_batch(model, batch, device)
-            batch_size = int(y.shape[0])
-            total_loss += float(loss_fn(pred, y).item()) * batch_size
+            batch_size = y.shape[0]
+            total_loss = total_loss + loss_fn(pred, y).detach() * batch_size
             total_samples += batch_size
     return _mean_loss(total_loss, total_samples)
 
@@ -260,8 +265,8 @@ def _train_one_epoch(request: TrainEpochRequest) -> float:
             if request.grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(_optimizer_parameters(request.optimizer), request.grad_clip_norm)
             request.optimizer.step()
-        batch_size = int(y.shape[0])
-        total_loss += float(loss.item()) * batch_size
+        batch_size = y.shape[0]
+        total_loss = total_loss + loss.detach() * batch_size
         total_samples += batch_size
     return _mean_loss(total_loss, total_samples)
 

@@ -20,7 +20,7 @@ class BranchEncoder(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int, embedding_dim: int, dropout: float):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2),
+            nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2, bias=False),
             nn.BatchNorm1d(hidden_channels),
             nn.ReLU(),
             nn.Dropout(dropout),

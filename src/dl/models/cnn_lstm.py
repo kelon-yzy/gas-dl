@@ -33,11 +33,11 @@ class CNNLSTMRegressor(nn.Module):
         out_dim = int(settings["out_dim"])
         padding = kernel_size // 2
         self.conv = nn.Sequential(
-            nn.Conv1d(in_channels, conv_channels, kernel_size=kernel_size, padding=padding),
+            nn.Conv1d(in_channels, conv_channels, kernel_size=kernel_size, padding=padding, bias=False),
             nn.BatchNorm1d(conv_channels),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Conv1d(conv_channels, conv_channels, kernel_size=3, padding=1),
+            nn.Conv1d(conv_channels, conv_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm1d(conv_channels),
             nn.ReLU(),
         )

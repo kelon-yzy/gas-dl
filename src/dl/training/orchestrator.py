@@ -231,8 +231,10 @@ def _prepare_loader_resources(config: dict, dependencies: TrainDependencies, out
 
 def _prepare_model_resources(config: dict, device: torch.device, amp_enabled: bool, label_weights: torch.Tensor | None = None) -> tuple:
     model = build_model(config["model"]).to(device)
-    # B3: torch.compile 支持（默认关闭，需 PyTorch 2.0+；Windows 上需 triton 后端）
-    compile_cfg = config["training"].get("compile", False)
+    # torch.compile：Linux 上默认开启（triton 可用），Windows 上默认关闭；可通过配置覆盖
+    import sys
+    compile_default = sys.platform.startswith("linux") and device.type == "cuda"
+    compile_cfg = config["training"].get("compile", compile_default)
     if compile_cfg and hasattr(torch, "compile"):
         compile_mode = config["training"].get("compile_mode", "reduce-overhead")
         try:

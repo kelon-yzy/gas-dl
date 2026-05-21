@@ -28,7 +28,7 @@ class CNN1DRegressor(nn.Module):
             k = kernel_size if i < 2 else 3
             layers.extend(
                 [
-                    nn.Conv1d(current, hidden, kernel_size=k, padding=k // 2),
+                    nn.Conv1d(current, hidden, kernel_size=k, padding=k // 2, bias=False),
                     nn.BatchNorm1d(hidden),
                     nn.ReLU(),
                 ]

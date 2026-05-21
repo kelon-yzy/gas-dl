@@ -75,7 +75,7 @@ class DeepAcousticEncoder1D(nn.Module):
             stride = 2 if i < len(channels) - 1 else 1
             layers.extend(
                 [
-                    nn.Conv1d(current, c, kernel_size=kernel_size, stride=stride, padding=kernel_size // 2),
+                    nn.Conv1d(current, c, kernel_size=kernel_size, stride=stride, padding=kernel_size // 2, bias=False),
                     nn.BatchNorm1d(c),
                     nn.ReLU(),
                 ]
@@ -115,10 +115,10 @@ class _CausalConv1d(nn.Module):
     与 src/dl/models/tcn.py 同构，本模块在此独立维护以避免 backbone 路径耦合。
     """
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int, bias: bool = True):
         super().__init__()
         self.padding = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=self.padding, dilation=dilation)
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=self.padding, dilation=dilation, bias=bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv(x)
@@ -131,14 +131,14 @@ class _TemporalBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int, dropout: float):
         super().__init__()
         self.net = nn.Sequential(
-            _CausalConv1d(in_channels, out_channels, kernel_size, dilation),
+            _CausalConv1d(in_channels, out_channels, kernel_size, dilation, bias=False),
             nn.BatchNorm1d(out_channels),
             nn.ReLU(),
             nn.Dropout(dropout),
-            _CausalConv1d(out_channels, out_channels, kernel_size, dilation),
+            _CausalConv1d(out_channels, out_channels, kernel_size, dilation, bias=False),
             nn.BatchNorm1d(out_channels),
         )
-        self.proj = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        self.proj = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False) if in_channels != out_channels else nn.Identity()
         self.act = nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

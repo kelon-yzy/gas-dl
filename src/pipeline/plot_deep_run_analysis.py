@@ -21,28 +21,33 @@ if str(ML_ROOT) not in sys.path:
 from pipeline.plot_deep_training_curves import (
     SUPPORTED_FORMATS,
     _import_plotting_modules,
-    _load_training_run,
     _resolve_cli_path,
     _save_figure,
     plot_training_run,
 )
-
-COMPONENTS = ("H2", "CH4", "CO2", "N2")
-
-
-def _load_predictions(run_dir: Path) -> pd.DataFrame:
-    return pd.read_csv(run_dir / "predictions.csv")
+from pipeline.run_plot_data import RunAnalysisBundle, load_run_analysis_bundle
 
 
-def _component_arrays(frame: pd.DataFrame, component: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    true_values = frame[f"y_true_{component}"].to_numpy(dtype=float)
-    pred_values = frame[f"y_pred_{component}"].to_numpy(dtype=float)
+def _component_axes(plt, count: int, *, figsize: tuple[float, float]) -> tuple[Any, list[Any]]:
+    cols = 2 if count > 1 else 1
+    rows = math.ceil(count / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=figsize)
+    if hasattr(axes, "flatten"):
+        flat_axes = list(axes.flatten())
+    else:
+        flat_axes = [axes]
+    return fig, flat_axes
+
+
+def _component_arrays(bundle: RunAnalysisBundle, component: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    true_values = bundle.predictions[f"y_true_{component}"].to_numpy(dtype=float)
+    pred_values = bundle.predictions[f"y_pred_{component}"].to_numpy(dtype=float)
     errors = pred_values - true_values
     return true_values, pred_values, errors
 
 
-def _component_stats(frame: pd.DataFrame, component: str) -> dict[str, float]:
-    true_values, pred_values, errors = _component_arrays(frame, component)
+def _component_stats(bundle: RunAnalysisBundle, component: str) -> dict[str, float]:
+    true_values, pred_values, errors = _component_arrays(bundle, component)
     rmse = float(np.sqrt(np.mean(np.square(errors))))
     mae = float(np.mean(np.abs(errors)))
     bias = float(np.mean(errors))
@@ -72,15 +77,13 @@ def _stats_text(stats: dict[str, float]) -> str:
     )
 
 
-def plot_prediction_scatter(run_dir: Path, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
+def plot_prediction_scatter(bundle: RunAnalysisBundle, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
     plt = _import_plotting_modules()
-    frame = _load_predictions(run_dir)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    axes_flat = axes.flatten()
+    fig, axes_flat = _component_axes(plt, len(bundle.components), figsize=(12, 10))
 
-    for axis, component in zip(axes_flat, COMPONENTS):
-        true_values, pred_values, errors = _component_arrays(frame, component)
-        stats = _component_stats(frame, component)
+    for axis, component in zip(axes_flat, bundle.components, strict=False):
+        true_values, pred_values, errors = _component_arrays(bundle, component)
+        stats = _component_stats(bundle, component)
         color_values = np.abs(errors)
         scatter = axis.scatter(
             true_values,
@@ -98,7 +101,7 @@ def plot_prediction_scatter(run_dir: Path, output_dir: Path, formats: tuple[str,
         axis.plot([lower - margin, upper + margin], [lower - margin, upper + margin], linestyle="--", color="#444444", linewidth=1.1)
         axis.set_xlim(lower - margin, upper + margin)
         axis.set_ylim(lower - margin, upper + margin)
-        axis.set_title(component)
+        axis.set_title(bundle.component_display_names.get(component, component))
         axis.set_xlabel("True (%)")
         axis.set_ylabel("Pred (%)")
         axis.grid(alpha=0.25)
@@ -114,27 +117,28 @@ def plot_prediction_scatter(run_dir: Path, output_dir: Path, formats: tuple[str,
         )
         fig.colorbar(scatter, ax=axis, fraction=0.046, pad=0.04, label="|Pred-True|")
 
-    fig.suptitle(f"{run_dir.name} | 真值-预测散点", fontsize=14)
+    for axis in axes_flat[len(bundle.components) :]:
+        axis.set_visible(False)
+
+    fig.suptitle(f"{bundle.run_name} | 真值-预测散点", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    saved_paths = _save_figure(fig, output_dir / f"{run_dir.name}_prediction_scatter", formats, dpi)
+    saved_paths = _save_figure(fig, output_dir / f"{bundle.run_dir.name}_prediction_scatter", formats, dpi)
     plt.close(fig)
     return saved_paths
 
 
-def plot_error_distributions(run_dir: Path, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
+def plot_error_distributions(bundle: RunAnalysisBundle, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
     plt = _import_plotting_modules()
-    frame = _load_predictions(run_dir)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-    axes_flat = axes.flatten()
+    fig, axes_flat = _component_axes(plt, len(bundle.components), figsize=(12, 9))
 
-    for axis, component in zip(axes_flat, COMPONENTS):
-        _, _, errors = _component_arrays(frame, component)
-        stats = _component_stats(frame, component)
+    for axis, component in zip(axes_flat, bundle.components, strict=False):
+        _, _, errors = _component_arrays(bundle, component)
+        stats = _component_stats(bundle, component)
         bins = min(40, max(10, len(errors) // 30))
         axis.hist(errors, bins=bins, color="#4c78a8", alpha=0.82, edgecolor="white")
         axis.axvline(0.0, color="#222222", linestyle="--", linewidth=1.0)
         axis.axvline(stats["bias"], color="#d62728", linestyle="-", linewidth=1.2)
-        axis.set_title(component)
+        axis.set_title(bundle.component_display_names.get(component, component))
         axis.set_xlabel("Pred - True (%)")
         axis.set_ylabel("Count")
         axis.grid(alpha=0.22)
@@ -155,9 +159,53 @@ def plot_error_distributions(run_dir: Path, output_dir: Path, formats: tuple[str
             bbox={"boxstyle": "round,pad=0.25", "fc": "white", "ec": "#d0d0d0", "alpha": 0.92},
         )
 
-    fig.suptitle(f"{run_dir.name} | 误差分布", fontsize=14)
+    for axis in axes_flat[len(bundle.components) :]:
+        axis.set_visible(False)
+
+    fig.suptitle(f"{bundle.run_name} | 误差分布", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    saved_paths = _save_figure(fig, output_dir / f"{run_dir.name}_error_distributions", formats, dpi)
+    saved_paths = _save_figure(fig, output_dir / f"{bundle.run_dir.name}_error_distributions", formats, dpi)
+    plt.close(fig)
+    return saved_paths
+
+
+def plot_component_metrics_summary(bundle: RunAnalysisBundle, output_dir: Path, formats: tuple[str, ...], dpi: int) -> list[Path]:
+    plt = _import_plotting_modules()
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8))
+    metrics = (
+        ("RMSE", "#1f77b4"),
+        ("MAE", "#2ca02c"),
+        ("R2", "#d62728"),
+    )
+    labels = [bundle.component_display_names.get(component, component) for component in bundle.components]
+
+    for axis, (metric_name, color) in zip(axes, metrics, strict=False):
+        values = bundle.component_metrics[metric_name].to_numpy(dtype=float)
+        bars = axis.bar(labels, values, color=color, alpha=0.88)
+        axis.set_title(metric_name)
+        axis.grid(axis="y", alpha=0.22)
+        axis.tick_params(axis="x", rotation=0)
+        for bar, value in zip(bars, values, strict=False):
+            axis.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height(),
+                f"{value:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+    fig.suptitle(
+        (
+            f"{bundle.run_name} | 组件指标概览\n"
+            f"macro_RMSE={float(bundle.summary['macro_RMSE']):.4f} | "
+            f"macro_MAE={float(bundle.summary['macro_MAE']):.4f} | "
+            f"mean_abs_sum_error={float(bundle.summary['mean_abs_sum_error']):.4f}"
+        ),
+        fontsize=14,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    saved_paths = _save_figure(fig, output_dir / f"{bundle.run_dir.name}_component_metrics_summary", formats, dpi)
     plt.close(fig)
     return saved_paths
 
@@ -169,14 +217,13 @@ def generate_run_analysis_artifacts(
     dpi: int = 300,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    run, warning = _load_training_run(run_dir.parent, run_dir)
-    if warning is not None or run is None:
-        raise ValueError(warning)
+    bundle = load_run_analysis_bundle(run_dir, require_report_files=True)
 
     generated_files: list[str] = []
-    generated_files.extend(str(path) for path in plot_training_run(run, output_dir, formats, dpi))
-    generated_files.extend(str(path) for path in plot_prediction_scatter(run_dir, output_dir, formats, dpi))
-    generated_files.extend(str(path) for path in plot_error_distributions(run_dir, output_dir, formats, dpi))
+    generated_files.extend(str(path) for path in plot_training_run(bundle, output_dir, formats, dpi))
+    generated_files.extend(str(path) for path in plot_prediction_scatter(bundle, output_dir, formats, dpi))
+    generated_files.extend(str(path) for path in plot_error_distributions(bundle, output_dir, formats, dpi))
+    generated_files.extend(str(path) for path in plot_component_metrics_summary(bundle, output_dir, formats, dpi))
 
     return {
         "run_dir": str(run_dir),
